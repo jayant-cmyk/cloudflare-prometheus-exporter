@@ -62,7 +62,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_ACCOUNTS` | - | Comma-separated account IDs to include (default: all) |
 | `CF_ZONES` | - | Comma-separated zone IDs to include (default: all) |
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
-| `METRIC_SHARDS` | `[]` | JSON array of metric shard rules. Treat `queryName`/`metricNames` like logical tables, `shardKeyLabel` like the integer shard key column, and `shardCount` like the number of physical shards. If the label is missing or non-integer at runtime, that rule is ignored for the metric. Enables sharded 5-second bucket storage for `colo-metrics` when configured. |
+| `METRIC_SHARDS` | `[]` | JSON array of metric shard rules. Treat `queryName`/`metricNames` like logical tables, `shardKeyLabel` like the integer shard key column, and `shardCount` like the number of physical shards. Optional `graphqlFilterField`, `shardKeyMin`, and exclusive `shardKeyMax` enable GraphQL range-filter pushdown where supported. Values below/above the configured range are queried with catch-all filters when the GraphQL field supports it. If the label is missing or non-integer at runtime, that rule is ignored for the metric. |
 | `HOST_METRICS_ALLOWLIST` | - | Comma-separated hostnames for hostname-level metrics (max 50). Empty disables. Adds 1 extra GraphQL call per account per refresh cycle. `EXCLUDE_HOST=true` also disables. |
 | `HOST_METRICS_DELAY_SECONDS` | 60 | Ingestion delay for hostname metrics (seconds). Lower values = fresher data for alerting but risk incomplete data. Independent from `SCRAPE_DELAY_SECONDS`. |
 | `METRICS_PATH` | /metrics | Custom path for metrics endpoint |
@@ -157,7 +157,7 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
-| `metricShards` | array | Metric shard rules: `{ queryName, metricNames?, shardKeyLabel, shardCount }` |
+| `metricShards` | array | Metric shard rules: `{ queryName, metricNames?, shardKeyLabel, graphqlFilterField?, shardKeyMin?, shardKeyMax?, shardCount }` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
 
@@ -180,10 +180,10 @@ curl -X PUT https://your-worker.workers.dev/config/cfZones \
   -H "Content-Type: application/json" \
   -d '{"value": "zone-id-1,zone-id-2"}'
 
-# Shard colo metric storage by the colo label into 16 shards
+# Shard colo metric fetching/storage by integer origin status into 16 shards
 curl -X PUT https://your-worker.workers.dev/config/metricShards \
   -H "Content-Type: application/json" \
-  -d '{"value":[{"queryName":"colo-metrics","shardKeyLabel":"colo","shardCount":16}]}'
+  -d '{"value":[{"queryName":"colo-metrics","shardKeyLabel":"origin_status","graphqlFilterField":"originResponseStatus","shardKeyMin":0,"shardKeyMax":65536,"shardCount":16}]}'
 
 # Reset to env default
 curl -X DELETE https://your-worker.workers.dev/config/logLevel

@@ -336,6 +336,125 @@ export const ColoMetricsQuery = graphql(`
   }
 `);
 
+export const ColoMetricsByOriginStatusRangeQuery = graphql(`
+  query ColoMetricsByOriginStatusRange(
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+    $originResponseStatusGeq: uint16!
+    $originResponseStatusLt: uint16!
+  ) {
+    viewer {
+      zones(filter: { zoneTag_in: $zoneIDs }) {
+        zoneTag
+        httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            originResponseStatus_geq: $originResponseStatusGeq
+            originResponseStatus_lt: $originResponseStatusLt
+          }
+        ) {
+          count
+          avg {
+            sampleInterval
+          }
+          dimensions {
+            clientRequestHTTPHost
+            coloCode
+            datetime
+            originResponseStatus
+          }
+          sum {
+            edgeResponseBytes
+            visits
+          }
+        }
+      }
+    }
+  }
+`);
+
+export const ColoMetricsByOriginStatusLtQuery = graphql(`
+  query ColoMetricsByOriginStatusLt(
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+    $originResponseStatusLt: uint16!
+  ) {
+    viewer {
+      zones(filter: { zoneTag_in: $zoneIDs }) {
+        zoneTag
+        httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            originResponseStatus_lt: $originResponseStatusLt
+          }
+        ) {
+          count
+          avg {
+            sampleInterval
+          }
+          dimensions {
+            clientRequestHTTPHost
+            coloCode
+            datetime
+            originResponseStatus
+          }
+          sum {
+            edgeResponseBytes
+            visits
+          }
+        }
+      }
+    }
+  }
+`);
+
+export const ColoMetricsByOriginStatusGeqQuery = graphql(`
+  query ColoMetricsByOriginStatusGeq(
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+    $originResponseStatusGeq: uint16!
+  ) {
+    viewer {
+      zones(filter: { zoneTag_in: $zoneIDs }) {
+        zoneTag
+        httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: {
+            datetime_geq: $mintime
+            datetime_lt: $maxtime
+            originResponseStatus_geq: $originResponseStatusGeq
+          }
+        ) {
+          count
+          avg {
+            sampleInterval
+          }
+          dimensions {
+            clientRequestHTTPHost
+            coloCode
+            datetime
+            originResponseStatus
+          }
+          sum {
+            edgeResponseBytes
+            visits
+          }
+        }
+      }
+    }
+  }
+`);
+
 export const ColoErrorMetricsQuery = graphql(`
   query ColoErrorMetrics(
     $zoneIDs: [string!]

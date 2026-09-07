@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import z from "zod";
 import {
+	type ColoMetricsShardFilter,
 	getCloudflareMetricsClient,
 	isAccountLevelQuery,
 	isZoneLevelQuery,
@@ -75,6 +76,9 @@ type InvalidMetricShardRule = {
 	shardKeyLabel: string;
 	reason: "missing_label" | "non_integer_label";
 };
+
+const ORIGIN_STATUS_MIN = 0;
+const ORIGIN_STATUS_MAX_EXCLUSIVE = 65536;
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -186,6 +190,80 @@ function shardIndex(value: string, shardCount: number): number | undefined {
 	if (!/^-?\d+$/.test(value)) return undefined;
 	const index = BigInt(value) % BigInt(shardCount);
 	return Number(index < 0 ? index + BigInt(shardCount) : index);
+}
+
+function inferColoMetricsGraphqlShardField(
+	shardKeyLabel: string,
+): ColoMetricsShardFilter["field"] | undefined {
+	return shardKeyLabel === "origin_status" ? "originResponseStatus" : undefined;
+}
+
+function coloMetricsShardFilters(
+	rules: MetricShardRule[],
+	logger: Logger,
+): ColoMetricsShardFilter[] {
+	const rule = rules.find(
+		(candidate) =>
+			candidate.graphqlFilterField !== undefined ||
+			inferColoMetricsGraphqlShardField(candidate.shardKeyLabel) !== undefined,
+	);
+	if (rule === undefined) return [];
+
+	const inferredField = inferColoMetricsGraphqlShardField(rule.shardKeyLabel);
+	const field = rule.graphqlFilterField ?? inferredField;
+	if (field !== "originResponseStatus") {
+		logger.warn("Ignoring unsupported GraphQL shard filter field", {
+			query: COLO_METRICS_QUERY_NAME,
+			shard_key_label: rule.shardKeyLabel,
+			graphql_filter_field: field,
+		});
+		return [];
+	}
+
+	const min = rule.shardKeyMin ?? ORIGIN_STATUS_MIN;
+	const max = rule.shardKeyMax ?? ORIGIN_STATUS_MAX_EXCLUSIVE;
+	if (
+		min < ORIGIN_STATUS_MIN ||
+		max > ORIGIN_STATUS_MAX_EXCLUSIVE ||
+		max <= min
+	) {
+		logger.warn("Ignoring invalid GraphQL shard key range", {
+			query: COLO_METRICS_QUERY_NAME,
+			shard_key_label: rule.shardKeyLabel,
+			graphql_filter_field: field,
+			shard_key_min: min,
+			shard_key_max: max,
+		});
+		return [];
+	}
+
+	const width = Math.ceil((max - min) / rule.shardCount);
+	const filters: ColoMetricsShardFilter[] = [];
+	if (min > ORIGIN_STATUS_MIN) {
+		filters.push({ field, lt: min });
+	}
+	for (let start = min; start < max; start += width) {
+		filters.push({
+			field,
+			geq: start,
+			lt: Math.min(start + width, max),
+		});
+	}
+	if (max < ORIGIN_STATUS_MAX_EXCLUSIVE) {
+		filters.push({ field, geq: max });
+	}
+	return filters;
+}
+
+function coloMetricsShardFilterLogContext(
+	filter: ColoMetricsShardFilter | undefined,
+): Record<string, string | number> {
+	if (filter === undefined) return {};
+	return {
+		graphql_filter_field: filter.field,
+		...("geq" in filter ? { graphql_filter_geq: filter.geq } : {}),
+		...("lt" in filter ? { graphql_filter_lt: filter.lt } : {}),
+	};
 }
 
 function splitMetricsForSharding(
@@ -836,6 +914,7 @@ export class MetricExporter extends DurableObject<Env> {
 	): Promise<MetricFetchResult> {
 		const timeRange = fixedMinuteRange(config);
 		const shardRules = metricShardRulesForQuery(config, state.queryName);
+		const shardFilters = coloMetricsShardFilters(shardRules, logger);
 		const partialErrors: unknown[] = [];
 		const failedScopes = new Set<string>();
 		const zoneRetryAfter: Record<string, number> = {};
@@ -855,6 +934,7 @@ export class MetricExporter extends DurableObject<Env> {
 					client,
 					state,
 					bucketRange,
+					shardFilters,
 					logger,
 				);
 				await this.saveStorageBucket(
@@ -912,6 +992,7 @@ export class MetricExporter extends DurableObject<Env> {
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		timeRange: TimeRange,
+		shardFilters: ColoMetricsShardFilter[],
 		logger: Logger,
 	): Promise<MetricFetchResult> {
 		const { accountName, zones } = state;
@@ -937,45 +1018,41 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 
 		const ZONES_PER_CHUNK = 10;
-		if (zonesToQuery.length <= ZONES_PER_CHUNK) {
-			const zoneIds = zonesToQuery.map((z) => z.id);
-			return {
-				metrics: await client.getShardedColoMetrics(
-					zoneIds,
-					zonesToQuery,
-					timeRange,
-				),
-				partialErrors: [],
-				failedScopes: new Set(),
-				zoneRetryAfter: {},
-			};
-		}
+		const filters = shardFilters.length > 0 ? shardFilters : [undefined];
 
 		const chunkResults: MetricDefinition[][] = [];
 		const partialErrors: unknown[] = [];
 		const failedScopes = new Set<string>();
 		let firstChunkError: unknown;
-		for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
-			const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
-			const chunkIds = chunkZones.map((z) => z.id);
+		for (const filter of filters) {
+			for (let i = 0; i < zonesToQuery.length; i += ZONES_PER_CHUNK) {
+				const chunkZones = zonesToQuery.slice(i, i + ZONES_PER_CHUNK);
+				const chunkIds = chunkZones.map((z) => z.id);
 
-			try {
-				chunkResults.push(
-					await client.getShardedColoMetrics(chunkIds, chunkZones, timeRange),
-				);
-			} catch (error) {
-				firstChunkError ??= error;
-				partialErrors.push(error);
-				for (const zone of chunkZones) failedScopes.add(zone.name);
-				logger.error("Sharded colo zone chunk query failed", {
-					query: state.queryName,
-					account: accountName,
-					chunk_index: Math.floor(i / ZONES_PER_CHUNK),
-					chunk_size: chunkZones.length,
-					total_zones: zonesToQuery.length,
-					failed_zones: chunkZones.map((z) => z.name),
-					error: error instanceof Error ? error.message : String(error),
-				});
+				try {
+					chunkResults.push(
+						await client.getShardedColoMetrics(
+							chunkIds,
+							chunkZones,
+							timeRange,
+							filter,
+						),
+					);
+				} catch (error) {
+					firstChunkError ??= error;
+					partialErrors.push(error);
+					for (const zone of chunkZones) failedScopes.add(zone.name);
+					logger.error("Sharded colo zone chunk query failed", {
+						query: state.queryName,
+						account: accountName,
+						chunk_index: Math.floor(i / ZONES_PER_CHUNK),
+						chunk_size: chunkZones.length,
+						total_zones: zonesToQuery.length,
+						failed_zones: chunkZones.map((z) => z.name),
+						...coloMetricsShardFilterLogContext(filter),
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 		}
 

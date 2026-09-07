@@ -25,6 +25,9 @@ import {
 	AdaptiveMetricsQuery,
 	CacheMissMetricsQuery,
 	ColoErrorMetricsQuery,
+	ColoMetricsByOriginStatusGeqQuery,
+	ColoMetricsByOriginStatusLtQuery,
+	ColoMetricsByOriginStatusRangeQuery,
 	ColoMetricsQuery,
 	EdgeCountryMetricsQuery,
 	HealthCheckMetricsQuery,
@@ -65,6 +68,10 @@ export {
 } from "./queries";
 
 const API_PAGE_SIZE = 100;
+
+export type ColoMetricsShardFilter = {
+	field: "originResponseStatus";
+} & ({ geq: number; lt: number } | { geq: number } | { lt: number });
 
 function graphQLQueryError(query: string, error: CombinedError): GraphQLError {
 	return new GraphQLError(
@@ -2275,13 +2282,15 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		filter?: ColoMetricsShardFilter,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(ColoMetricsQuery, {
+		const baseVariables = {
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
-		});
+		};
+		const result = await this.queryShardedColoMetrics(baseVariables, filter);
 
 		if (result.error) {
 			throw graphQLQueryError("colo-metrics", result.error);
@@ -2315,6 +2324,7 @@ export class CloudflareMetricsClient {
 					zone: zoneName,
 					colo: dim?.coloCode ?? "",
 					host: dim?.clientRequestHTTPHost ?? "",
+					origin_status: String(dim?.originResponseStatus ?? 0),
 				};
 
 				const visitsValue = group.sum?.visits;
@@ -2336,6 +2346,37 @@ export class CloudflareMetricsClient {
 		return [visits, responseBytes, requestsTotal].filter(
 			(m) => m.values.length > 0,
 		);
+	}
+
+	private async queryShardedColoMetrics(
+		baseVariables: {
+			zoneIDs: string[];
+			mintime: string;
+			maxtime: string;
+			limit: number;
+		},
+		filter?: ColoMetricsShardFilter,
+	) {
+		if (filter === undefined) {
+			return this.gql.query(ColoMetricsQuery, baseVariables);
+		}
+		if ("geq" in filter && "lt" in filter) {
+			return this.gql.query(ColoMetricsByOriginStatusRangeQuery, {
+				...baseVariables,
+				originResponseStatusGeq: filter.geq,
+				originResponseStatusLt: filter.lt,
+			});
+		}
+		if ("lt" in filter) {
+			return this.gql.query(ColoMetricsByOriginStatusLtQuery, {
+				...baseVariables,
+				originResponseStatusLt: filter.lt,
+			});
+		}
+		return this.gql.query(ColoMetricsByOriginStatusGeqQuery, {
+			...baseVariables,
+			originResponseStatusGeq: filter.geq,
+		});
 	}
 
 	/**

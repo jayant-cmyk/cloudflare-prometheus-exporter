@@ -68,8 +68,18 @@ const ConfigValueSchemas = {
 				queryName: z.string().min(1),
 				metricNames: z.array(z.string().min(1)).min(1).optional(),
 				shardKeyLabel: z.string().min(1),
+				graphqlFilterField: z.string().min(1).optional(),
+				shardKeyMin: z.number().int().optional(),
+				shardKeyMax: z.number().int().optional(),
 				shardCount: z.number().int().min(1).max(256),
 			})
+			.refine(
+				(rule) =>
+					rule.shardKeyMin === undefined ||
+					rule.shardKeyMax === undefined ||
+					rule.shardKeyMax > rule.shardKeyMin,
+				"shardKeyMax must be greater than shardKeyMin",
+			)
 			.readonly(),
 	),
 	hostMetricsAllowlist: z.string(),
