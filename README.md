@@ -62,7 +62,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_ACCOUNTS` | - | Comma-separated account IDs to include (default: all) |
 | `CF_ZONES` | - | Comma-separated zone IDs to include (default: all) |
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
-| `METRIC_SHARDS` | `[]` | JSON array of metric shard rules. Treat `queryName`/`metricNames` like logical tables, `shardKeyLabel` like the shard key column, and `shardCount` like the number of physical shards. Enables sharded 5-second bucket storage for `colo-metrics` when configured. |
+| `METRIC_SHARDS` | `[]` | JSON array of metric shard rules. Treat `queryName`/`metricNames` like logical tables, `shardKeyLabel` like the integer shard key column, and `shardCount` like the number of physical shards. If the label is missing or non-integer at runtime, that rule is ignored for the metric. Enables sharded 5-second bucket storage for `colo-metrics` when configured. |
 | `HOST_METRICS_ALLOWLIST` | - | Comma-separated hostnames for hostname-level metrics (max 50). Empty disables. Adds 1 extra GraphQL call per account per refresh cycle. `EXCLUDE_HOST=true` also disables. |
 | `HOST_METRICS_DELAY_SECONDS` | 60 | Ingestion delay for hostname metrics (seconds). Lower values = fresher data for alerting but risk incomplete data. Independent from `SCRAPE_DELAY_SECONDS`. |
 | `METRICS_PATH` | /metrics | Custom path for metrics endpoint |

@@ -70,6 +70,11 @@ const ShardedStorageBucketManifestSchema = z.object({
 
 type MetricShardRule = ResolvedConfig["metricShards"][number];
 type MetricShardMetadata = z.infer<typeof MetricShardMetadataSchema>;
+type InvalidMetricShardRule = {
+	metricName: string;
+	shardKeyLabel: string;
+	reason: "missing_label" | "non_integer_label";
+};
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -177,12 +182,10 @@ function metricShardRuleForMetric(
 	);
 }
 
-function shardIndex(value: string, shardCount: number): number {
-	let hash = 0;
-	for (let i = 0; i < value.length; i++) {
-		hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-	}
-	return hash % shardCount;
+function shardIndex(value: string, shardCount: number): number | undefined {
+	if (!/^-?\d+$/.test(value)) return undefined;
+	const index = BigInt(value) % BigInt(shardCount);
+	return Number(index < 0 ? index + BigInt(shardCount) : index);
 }
 
 function splitMetricsForSharding(
@@ -192,13 +195,15 @@ function splitMetricsForSharding(
 	unshardedMetrics: MetricDefinition[];
 	shardMetrics: Map<number, MetricDefinition[]>;
 	shardedMetrics: MetricShardMetadata[];
+	invalidRules: InvalidMetricShardRule[];
 } {
 	const unshardedMetrics: MetricDefinition[] = [];
 	const shardMetrics = new Map<number, MetricDefinition[]>();
 	const shardedMetrics: MetricShardMetadata[] = [];
+	const invalidRules: InvalidMetricShardRule[] = [];
 
 	// Database-style sharding: metric family ~= table, label ~= shard key
-	// column, hash(label value) % shardCount ~= physical shard selection.
+	// column, integer(label value) % shardCount ~= physical shard selection.
 	for (const metric of metrics) {
 		const rule = metricShardRuleForMetric(rules, metric.name);
 		if (rule === undefined) {
@@ -206,22 +211,32 @@ function splitMetricsForSharding(
 			continue;
 		}
 
-		const unshardedValues: MetricValue[] = [];
 		const valuesByShard = new Map<number, MetricValue[]>();
+		let invalidReason: InvalidMetricShardRule["reason"] | undefined;
 		for (const value of metric.values) {
 			const labelValue = value.labels[rule.shardKeyLabel];
 			if (labelValue === undefined) {
-				unshardedValues.push(value);
-				continue;
+				invalidReason = "missing_label";
+				break;
 			}
 			const index = shardIndex(labelValue, rule.shardCount);
+			if (index === undefined) {
+				invalidReason = "non_integer_label";
+				break;
+			}
 			const values = valuesByShard.get(index) ?? [];
 			values.push(value);
 			valuesByShard.set(index, values);
 		}
 
-		if (unshardedValues.length > 0) {
-			unshardedMetrics.push({ ...metric, values: unshardedValues });
+		if (invalidReason !== undefined) {
+			unshardedMetrics.push(metric);
+			invalidRules.push({
+				metricName: metric.name,
+				shardKeyLabel: rule.shardKeyLabel,
+				reason: invalidReason,
+			});
+			continue;
 		}
 
 		for (let index = 0; index < rule.shardCount; index++) {
@@ -241,7 +256,7 @@ function splitMetricsForSharding(
 		});
 	}
 
-	return { unshardedMetrics, shardMetrics, shardedMetrics };
+	return { unshardedMetrics, shardMetrics, shardedMetrics, invalidRules };
 }
 
 /**
@@ -583,6 +598,7 @@ export class MetricExporter extends DurableObject<Env> {
 			const metricStorage = await this.saveStateMetricShards(
 				processed.metrics,
 				shardRules,
+				logger,
 			);
 			const refreshedState: MetricExporterState = {
 				...currentState,
@@ -645,11 +661,21 @@ export class MetricExporter extends DurableObject<Env> {
 		await this.ctx.storage.setAlarm(nextAlarm);
 	}
 
+	private logInvalidMetricShardRules(
+		invalidRules: InvalidMetricShardRule[],
+		logger: Logger,
+	): void {
+		for (const invalidRule of invalidRules) {
+			logger.warn("Ignoring metric shard rule for metric", invalidRule);
+		}
+	}
+
 	private async saveStorageBucket(
 		key: string,
 		bucketStart: string,
 		metrics: MetricDefinition[],
 		rules: MetricShardRule[],
+		logger: Logger,
 	): Promise<void> {
 		if (rules.length === 0) {
 			await saveChunkedValue(
@@ -663,8 +689,20 @@ export class MetricExporter extends DurableObject<Env> {
 			return;
 		}
 
-		const { unshardedMetrics, shardMetrics, shardedMetrics } =
+		const { unshardedMetrics, shardMetrics, shardedMetrics, invalidRules } =
 			splitMetricsForSharding(metrics, rules);
+		this.logInvalidMetricShardRules(invalidRules, logger);
+		if (shardedMetrics.length === 0) {
+			await saveChunkedValue(
+				chunkedDurableObjectStorage(this.ctx.storage),
+				key,
+				{
+					timestamp: bucketStart,
+					metrics,
+				},
+			);
+			return;
+		}
 
 		const maxShards = Math.max(
 			0,
@@ -726,13 +764,15 @@ export class MetricExporter extends DurableObject<Env> {
 	private async saveStateMetricShards(
 		metrics: MetricDefinition[],
 		rules: MetricShardRule[],
+		logger: Logger,
 	): Promise<{ metrics: MetricDefinition[]; enabled: boolean }> {
 		if (rules.length === 0) {
 			return { metrics, enabled: false };
 		}
 
-		const { unshardedMetrics, shardMetrics, shardedMetrics } =
+		const { unshardedMetrics, shardMetrics, shardedMetrics, invalidRules } =
 			splitMetricsForSharding(metrics, rules);
+		this.logInvalidMetricShardRules(invalidRules, logger);
 		if (shardedMetrics.length === 0) {
 			return { metrics, enabled: false };
 		}
@@ -822,6 +862,7 @@ export class MetricExporter extends DurableObject<Env> {
 					bucketRange.mintime,
 					result.metrics,
 					shardRules,
+					logger,
 				);
 				for (const error of result.partialErrors) partialErrors.push(error);
 				for (const scope of result.failedScopes) failedScopes.add(scope);
@@ -830,9 +871,9 @@ export class MetricExporter extends DurableObject<Env> {
 			} catch (error) {
 				firstError ??= error;
 				partialErrors.push(error);
-				logger.error("Sharded colo timestamp query failed", {
-					timestamp: bucketRange.mintime,
-					shard_end: bucketRange.maxtime,
+				logger.error("Sharded colo storage bucket query failed", {
+					bucket_start: bucketRange.mintime,
+					bucket_end: bucketRange.maxtime,
 					error: error instanceof Error ? error.message : String(error),
 				});
 				try {
@@ -841,10 +882,11 @@ export class MetricExporter extends DurableObject<Env> {
 						bucketRange.mintime,
 						[],
 						shardRules,
+						logger,
 					);
 				} catch (storageError) {
-					logger.error("Failed to clear stale sharded colo timestamp", {
-						timestamp: bucketRange.mintime,
+					logger.error("Failed to clear stale sharded colo storage bucket", {
+						bucket_start: bucketRange.mintime,
 						error:
 							storageError instanceof Error
 								? storageError.message
