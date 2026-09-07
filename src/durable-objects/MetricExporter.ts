@@ -19,6 +19,7 @@ import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
 import {
 	type MetricDefinition,
 	MetricDefinitionSchema,
+	type MetricValue,
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
@@ -33,15 +34,42 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
+const STATE_METRIC_SHARDS_KEY = "metric-shards";
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 const COLO_METRICS_QUERY_NAME = "colo-metrics";
-const COLO_SHARD_SECONDS = 5;
-const COLO_SHARD_ROTATION_MINUTES = 3;
+const STORAGE_BUCKET_SECONDS = 5;
+const STORAGE_BUCKET_ROTATION_MINUTES = 3;
 
-const ColoTimestampShardSchema = z.object({
+const StorageBucketPayloadSchema = z.object({
 	timestamp: z.string(),
 	metrics: z.array(MetricDefinitionSchema),
 });
+
+const MetricShardMetadataSchema = z.object({
+	name: z.string(),
+	help: z.string(),
+	type: z.enum(["counter", "gauge"]),
+	shardKeyLabel: z.string(),
+	shardCount: z.number().int().positive(),
+});
+
+const MetricShardPayloadSchema = z.object({
+	metrics: z.array(MetricDefinitionSchema),
+});
+
+const ShardedMetricManifestSchema = z.object({
+	metrics: z.array(MetricDefinitionSchema),
+	shardedMetrics: z.array(MetricShardMetadataSchema),
+});
+
+const ShardedStorageBucketManifestSchema = z.object({
+	timestamp: z.string(),
+	metrics: z.array(MetricDefinitionSchema),
+	shardedMetrics: z.array(MetricShardMetadataSchema),
+});
+
+type MetricShardRule = ResolvedConfig["metricShards"][number];
+type MetricShardMetadata = z.infer<typeof MetricShardMetadataSchema>;
 
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -58,6 +86,7 @@ const MetricExporterStateSchema = z.object({
 	// Metric storage
 	counters: z.record(z.string(), CounterStateSchema),
 	metrics: z.array(MetricDefinitionSchema),
+	metricShardsEnabled: z.boolean().default(false),
 	lastIngest: z.number(),
 
 	// Context for fetching (account-scoped)
@@ -88,35 +117,37 @@ type MetricFetchResult = {
 	zoneRetryAfter: Record<string, number>;
 };
 
-function coloTimestampShardKey(
+function storageBucketKey(
 	queryName: string,
 	accountId: string,
-	timestamp: Date,
+	bucketStart: Date,
+	suffix = "",
 ): string {
-	const minuteSlot = timestamp.getUTCMinutes() % COLO_SHARD_ROTATION_MINUTES;
+	const minuteSlot =
+		bucketStart.getUTCMinutes() % STORAGE_BUCKET_ROTATION_MINUTES;
 	const seconds =
-		Math.floor(timestamp.getUTCSeconds() / COLO_SHARD_SECONDS) *
-		COLO_SHARD_SECONDS;
-	return `${queryName}_${accountId}_${minuteSlot}_min_${seconds}`;
+		Math.floor(bucketStart.getUTCSeconds() / STORAGE_BUCKET_SECONDS) *
+		STORAGE_BUCKET_SECONDS;
+	return `${queryName}_${accountId}_${minuteSlot}_min_${seconds}${suffix}`;
 }
 
 function fixedMinuteRange(config: ResolvedConfig): TimeRange {
 	return getTimeRange(config.scrapeDelaySeconds, 60);
 }
 
-function currentColoShardTimestamp(config: ResolvedConfig): Date {
-	const currentSeconds = Math.floor(
-		new Date().getUTCSeconds() / COLO_SHARD_SECONDS,
-	) * COLO_SHARD_SECONDS;
+function currentStorageBucketStart(config: ResolvedConfig): Date {
+	const currentSeconds =
+		Math.floor(new Date().getUTCSeconds() / STORAGE_BUCKET_SECONDS) *
+		STORAGE_BUCKET_SECONDS;
 	const minuteStart = new Date(fixedMinuteRange(config).mintime);
 	minuteStart.setUTCSeconds(currentSeconds, 0);
 	return minuteStart;
 }
 
-function coloTimestampShardRanges(timeRange: TimeRange): TimeRange[] {
+function storageBucketRanges(timeRange: TimeRange): TimeRange[] {
 	const startMs = new Date(timeRange.mintime).getTime();
 	const endMs = new Date(timeRange.maxtime).getTime();
-	const bucketMs = COLO_SHARD_SECONDS * 1000;
+	const bucketMs = STORAGE_BUCKET_SECONDS * 1000;
 	const ranges: TimeRange[] = [];
 
 	for (let start = startMs; start < endMs; start += bucketMs) {
@@ -127,6 +158,90 @@ function coloTimestampShardRanges(timeRange: TimeRange): TimeRange[] {
 	}
 
 	return ranges;
+}
+
+function metricShardRulesForQuery(
+	config: ResolvedConfig,
+	queryName: string,
+): MetricShardRule[] {
+	return config.metricShards.filter((rule) => rule.queryName === queryName);
+}
+
+function metricShardRuleForMetric(
+	rules: MetricShardRule[],
+	metricName: string,
+): MetricShardRule | undefined {
+	return rules.find(
+		(rule) =>
+			rule.metricNames === undefined || rule.metricNames.includes(metricName),
+	);
+}
+
+function shardIndex(value: string, shardCount: number): number {
+	let hash = 0;
+	for (let i = 0; i < value.length; i++) {
+		hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+	}
+	return hash % shardCount;
+}
+
+function splitMetricsForSharding(
+	metrics: MetricDefinition[],
+	rules: MetricShardRule[],
+): {
+	unshardedMetrics: MetricDefinition[];
+	shardMetrics: Map<number, MetricDefinition[]>;
+	shardedMetrics: MetricShardMetadata[];
+} {
+	const unshardedMetrics: MetricDefinition[] = [];
+	const shardMetrics = new Map<number, MetricDefinition[]>();
+	const shardedMetrics: MetricShardMetadata[] = [];
+
+	// Database-style sharding: metric family ~= table, label ~= shard key
+	// column, hash(label value) % shardCount ~= physical shard selection.
+	for (const metric of metrics) {
+		const rule = metricShardRuleForMetric(rules, metric.name);
+		if (rule === undefined) {
+			unshardedMetrics.push(metric);
+			continue;
+		}
+
+		const unshardedValues: MetricValue[] = [];
+		const valuesByShard = new Map<number, MetricValue[]>();
+		for (const value of metric.values) {
+			const labelValue = value.labels[rule.shardKeyLabel];
+			if (labelValue === undefined) {
+				unshardedValues.push(value);
+				continue;
+			}
+			const index = shardIndex(labelValue, rule.shardCount);
+			const values = valuesByShard.get(index) ?? [];
+			values.push(value);
+			valuesByShard.set(index, values);
+		}
+
+		if (unshardedValues.length > 0) {
+			unshardedMetrics.push({ ...metric, values: unshardedValues });
+		}
+
+		for (let index = 0; index < rule.shardCount; index++) {
+			const values = valuesByShard.get(index) ?? [];
+			if (values.length === 0) continue;
+			const metricsForShard = shardMetrics.get(index) ?? [];
+			metricsForShard.push({ ...metric, values });
+			shardMetrics.set(index, metricsForShard);
+		}
+
+		shardedMetrics.push({
+			name: metric.name,
+			help: metric.help,
+			type: metric.type,
+			shardKeyLabel: rule.shardKeyLabel,
+			shardCount: rule.shardCount,
+		});
+	}
+
+	return { unshardedMetrics, shardMetrics, shardedMetrics };
 }
 
 /**
@@ -236,6 +351,7 @@ export class MetricExporter extends DurableObject<Env> {
 			queryName: parsed.queryName,
 			counters: {},
 			metrics: [],
+			metricShardsEnabled: false,
 			lastIngest: 0,
 			accountId: "",
 			accountName: "",
@@ -460,9 +576,18 @@ export class MetricExporter extends DurableObject<Env> {
 				},
 			);
 			const currentState = this.getState();
+			const shardRules = metricShardRulesForQuery(
+				config,
+				currentState.queryName,
+			);
+			const metricStorage = await this.saveStateMetricShards(
+				processed.metrics,
+				shardRules,
+			);
 			const refreshedState: MetricExporterState = {
 				...currentState,
-				metrics: processed.metrics,
+				metrics: metricStorage.metrics,
+				metricShardsEnabled: metricStorage.enabled,
 				counters: processed.counters,
 				lastIngest: ingestId,
 				lastRefresh: Date.now(),
@@ -520,26 +645,169 @@ export class MetricExporter extends DurableObject<Env> {
 		await this.ctx.storage.setAlarm(nextAlarm);
 	}
 
-	/** Fetch and persist sharded colo metric timestamp buckets for one delayed minute. */
-	private async refreshShardedColoTimestampBuckets(
+	private async saveStorageBucket(
+		key: string,
+		bucketStart: string,
+		metrics: MetricDefinition[],
+		rules: MetricShardRule[],
+	): Promise<void> {
+		if (rules.length === 0) {
+			await saveChunkedValue(
+				chunkedDurableObjectStorage(this.ctx.storage),
+				key,
+				{
+					timestamp: bucketStart,
+					metrics,
+				},
+			);
+			return;
+		}
+
+		const { unshardedMetrics, shardMetrics, shardedMetrics } =
+			splitMetricsForSharding(metrics, rules);
+
+		const maxShards = Math.max(
+			0,
+			...shardedMetrics.map((metric) => metric.shardCount),
+		);
+		const storage = chunkedDurableObjectStorage(this.ctx.storage);
+		await saveChunkedValue(storage, `${key}:manifest`, {
+			timestamp: bucketStart,
+			metrics: unshardedMetrics,
+			shardedMetrics,
+		});
+		for (let index = 0; index < maxShards; index++) {
+			await saveChunkedValue(storage, `${key}:shard:${index}`, {
+				timestamp: bucketStart,
+				metrics: shardMetrics.get(index) ?? [],
+			});
+		}
+	}
+
+	private async loadStorageBucket(
+		key: string,
+		bucketStart: string,
+		rules: MetricShardRule[],
+	): Promise<MetricDefinition[]> {
+		const storage = chunkedDurableObjectStorage(this.ctx.storage);
+		if (rules.length === 0) {
+			const bucket = await loadChunkedValue(
+				storage,
+				key,
+				StorageBucketPayloadSchema,
+			);
+			return bucket?.timestamp === bucketStart ? bucket.metrics : [];
+		}
+
+		const manifest = await loadChunkedValue(
+			storage,
+			`${key}:manifest`,
+			ShardedStorageBucketManifestSchema,
+		);
+		if (manifest?.timestamp !== bucketStart) return [];
+
+		const maxShards = Math.max(
+			0,
+			...manifest.shardedMetrics.map((metric) => metric.shardCount),
+		);
+		const metricGroups = [manifest.metrics];
+		for (let index = 0; index < maxShards; index++) {
+			const shard = await loadChunkedValue(
+				storage,
+				`${key}:shard:${index}`,
+				StorageBucketPayloadSchema,
+			);
+			if (shard?.timestamp === bucketStart) metricGroups.push(shard.metrics);
+		}
+
+		return mergeMetricDefinitions(...metricGroups);
+	}
+
+	private async saveStateMetricShards(
+		metrics: MetricDefinition[],
+		rules: MetricShardRule[],
+	): Promise<{ metrics: MetricDefinition[]; enabled: boolean }> {
+		if (rules.length === 0) {
+			return { metrics, enabled: false };
+		}
+
+		const { unshardedMetrics, shardMetrics, shardedMetrics } =
+			splitMetricsForSharding(metrics, rules);
+		if (shardedMetrics.length === 0) {
+			return { metrics, enabled: false };
+		}
+
+		const maxShards = Math.max(
+			0,
+			...shardedMetrics.map((metric) => metric.shardCount),
+		);
+		const storage = chunkedDurableObjectStorage(this.ctx.storage);
+		await saveChunkedValue(storage, `${STATE_METRIC_SHARDS_KEY}:manifest`, {
+			metrics: unshardedMetrics,
+			shardedMetrics,
+		});
+		for (let index = 0; index < maxShards; index++) {
+			await saveChunkedValue(
+				storage,
+				`${STATE_METRIC_SHARDS_KEY}:shard:${index}`,
+				{
+					metrics: shardMetrics.get(index) ?? [],
+				},
+			);
+		}
+
+		return { metrics: unshardedMetrics, enabled: true };
+	}
+
+	private async loadStateMetricShards(
+		metrics: MetricDefinition[],
+	): Promise<MetricDefinition[]> {
+		const storage = chunkedDurableObjectStorage(this.ctx.storage);
+		const manifest = await loadChunkedValue(
+			storage,
+			`${STATE_METRIC_SHARDS_KEY}:manifest`,
+			ShardedMetricManifestSchema,
+		);
+		if (manifest === undefined) return metrics;
+
+		const maxShards = Math.max(
+			0,
+			...manifest.shardedMetrics.map((metric) => metric.shardCount),
+		);
+		const metricGroups = [manifest.metrics];
+		for (let index = 0; index < maxShards; index++) {
+			const shard = await loadChunkedValue(
+				storage,
+				`${STATE_METRIC_SHARDS_KEY}:shard:${index}`,
+				MetricShardPayloadSchema,
+			);
+			if (shard !== undefined) metricGroups.push(shard.metrics);
+		}
+
+		return mergeMetricDefinitions(...metricGroups);
+	}
+
+	/** Fetch and persist sharded colo metric storage buckets for one delayed minute. */
+	private async refreshShardedColoStorageBuckets(
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<MetricFetchResult> {
 		const timeRange = fixedMinuteRange(config);
+		const shardRules = metricShardRulesForQuery(config, state.queryName);
 		const partialErrors: unknown[] = [];
 		const failedScopes = new Set<string>();
 		const zoneRetryAfter: Record<string, number> = {};
 		let firstError: unknown;
 		let successfulBuckets = 0;
 
-		for (const bucketRange of coloTimestampShardRanges(timeRange)) {
-			const timestamp = new Date(bucketRange.mintime);
-			const key = coloTimestampShardKey(
+		for (const bucketRange of storageBucketRanges(timeRange)) {
+			const bucketStart = new Date(bucketRange.mintime);
+			const key = storageBucketKey(
 				state.queryName,
 				state.accountId,
-				timestamp,
+				bucketStart,
 			);
 
 			try {
@@ -547,13 +815,13 @@ export class MetricExporter extends DurableObject<Env> {
 					client,
 					state,
 					bucketRange,
-					config,
 					logger,
 				);
-				await saveChunkedValue(
-					chunkedDurableObjectStorage(this.ctx.storage),
+				await this.saveStorageBucket(
 					key,
-					{ timestamp: bucketRange.mintime, metrics: result.metrics },
+					bucketRange.mintime,
+					result.metrics,
+					shardRules,
 				);
 				for (const error of result.partialErrors) partialErrors.push(error);
 				for (const scope of result.failedScopes) failedScopes.add(scope);
@@ -568,10 +836,11 @@ export class MetricExporter extends DurableObject<Env> {
 					error: error instanceof Error ? error.message : String(error),
 				});
 				try {
-					await saveChunkedValue(
-						chunkedDurableObjectStorage(this.ctx.storage),
+					await this.saveStorageBucket(
 						key,
-						{ timestamp: bucketRange.mintime, metrics: [] },
+						bucketRange.mintime,
+						[],
+						shardRules,
 					);
 				} catch (storageError) {
 					logger.error("Failed to clear stale sharded colo timestamp", {
@@ -601,7 +870,6 @@ export class MetricExporter extends DurableObject<Env> {
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		timeRange: TimeRange,
-		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<MetricFetchResult> {
 		const { accountName, zones } = state;
@@ -700,8 +968,11 @@ export class MetricExporter extends DurableObject<Env> {
 		logger: Logger,
 	): Promise<MetricFetchResult> {
 		const { queryName, accountId, accountName, zones, firewallRules } = state;
-		if (queryName === COLO_METRICS_QUERY_NAME && config.shardColoMetrics) {
-			return this.refreshShardedColoTimestampBuckets(
+		if (
+			queryName === COLO_METRICS_QUERY_NAME &&
+			metricShardRulesForQuery(config, queryName).length > 0
+		) {
+			return this.refreshShardedColoStorageBuckets(
 				client,
 				state,
 				config,
@@ -961,37 +1232,41 @@ export class MetricExporter extends DurableObject<Env> {
 		if (state.scopeType === "account") {
 			return this.exportAccountScopedMetrics(state);
 		}
+		if (state.metricShardsEnabled) {
+			return this.loadStateMetricShards(state.metrics);
+		}
 		return state.metrics;
 	}
 
 	private async exportAccountScopedMetrics(
 		state: MetricExporterState,
 	): Promise<MetricDefinition[]> {
+		if (state.queryName !== COLO_METRICS_QUERY_NAME) {
+			if (state.metricShardsEnabled) {
+				return this.loadStateMetricShards(state.metrics);
+			}
+			return state.metrics;
+		}
+
 		const config = await getConfig(this.env);
-		if (state.queryName === COLO_METRICS_QUERY_NAME && config.shardColoMetrics) {
-			return this.exportShardedColoTimestampBucket(state, config);
+		if (metricShardRulesForQuery(config, state.queryName).length > 0) {
+			return this.exportShardedColoStorageBucket(state, config);
 		}
 		return state.metrics;
 	}
 
-	private async exportShardedColoTimestampBucket(
+	private async exportShardedColoStorageBucket(
 		state: MetricExporterState,
 		config: ResolvedConfig,
 	): Promise<MetricDefinition[]> {
 		if (state.scopeType !== "account") return [];
-		const timestamp = currentColoShardTimestamp(config);
-		const key = coloTimestampShardKey(
-			state.queryName,
-			state.accountId,
-			timestamp,
-		);
-		const bucket = await loadChunkedValue(
-			chunkedDurableObjectStorage(this.ctx.storage),
+		const bucketStart = currentStorageBucketStart(config);
+		const bucketStartString = bucketStart.toISOString();
+		const key = storageBucketKey(state.queryName, state.accountId, bucketStart);
+		return this.loadStorageBucket(
 			key,
-			ColoTimestampShardSchema,
+			bucketStartString,
+			metricShardRulesForQuery(config, state.queryName),
 		);
-		return bucket?.timestamp === timestamp.toISOString()
-			? bucket.metrics
-			: [];
 	}
 }

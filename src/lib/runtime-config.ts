@@ -28,7 +28,7 @@ export const ConfigKeySchema = z.enum([
 	// Output options
 	"excludeHost",
 	"httpStatusGroup",
-	"shardColoMetrics",
+	"metricShards",
 	// Hostname metrics
 	"hostMetricsAllowlist",
 	"hostMetricsDelaySeconds",
@@ -59,7 +59,19 @@ const ConfigValueSchemas = {
 	metricsDenylist: z.string(),
 	excludeHost: z.boolean(),
 	httpStatusGroup: z.boolean(),
-	shardColoMetrics: z.boolean(),
+	// Database-style sharding config for metric storage:
+	// queryName/metricNames select logical metric tables, shardKeyLabel selects
+	// the label column, and shardCount controls physical shard fan-out.
+	metricShards: z.array(
+		z
+			.object({
+				queryName: z.string().min(1),
+				metricNames: z.array(z.string().min(1)).min(1).optional(),
+				shardKeyLabel: z.string().min(1),
+				shardCount: z.number().int().min(1).max(256),
+			})
+			.readonly(),
+	),
 	hostMetricsAllowlist: z.string(),
 	hostMetricsDelaySeconds: z.number().int().min(30),
 } as const;
@@ -90,7 +102,7 @@ export const ConfigOverridesSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist.optional(),
 		excludeHost: ConfigValueSchemas.excludeHost.optional(),
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup.optional(),
-		shardColoMetrics: ConfigValueSchemas.shardColoMetrics.optional(),
+		metricShards: ConfigValueSchemas.metricShards.optional(),
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
 		hostMetricsDelaySeconds:
 			ConfigValueSchemas.hostMetricsDelaySeconds.optional(),
@@ -124,7 +136,7 @@ export const ResolvedConfigSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist,
 		excludeHost: ConfigValueSchemas.excludeHost,
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
-		shardColoMetrics: ConfigValueSchemas.shardColoMetrics,
+		metricShards: ConfigValueSchemas.metricShards,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
 		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
 	})
@@ -145,8 +157,19 @@ type OptionalEnvVars = {
 	CF_FREE_TIER_ACCOUNTS?: string;
 	HEALTH_CHECK_CACHE_TTL_SECONDS?: string;
 	HOST_METRICS_ALLOWLIST?: string;
-	SHARD_COLO_METRICS?: boolean;
+	METRIC_SHARDS?: string;
 };
+
+function parseMetricShards(
+	raw: string | undefined,
+): ResolvedConfig["metricShards"] {
+	if (!raw?.trim()) return [];
+	try {
+		return ConfigValueSchemas.metricShards.catch([]).parse(JSON.parse(raw));
+	} catch {
+		return [];
+	}
+}
 
 /**
  * Gets default configuration values from environment variables.
@@ -200,7 +223,7 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.boolean()
 			.catch(false)
 			.parse(env.CF_HTTP_STATUS_GROUP),
-		shardColoMetrics: z.boolean().catch(false).parse(optionalEnv.SHARD_COLO_METRICS),
+		metricShards: parseMetricShards(optionalEnv.METRIC_SHARDS),
 		hostMetricsAllowlist: optionalEnv.HOST_METRICS_ALLOWLIST?.trim() ?? "",
 		hostMetricsDelaySeconds: z.coerce
 			.number()
@@ -291,8 +314,7 @@ function mergeConfig(
 		metricsDenylist: overrides.metricsDenylist ?? defaults.metricsDenylist,
 		excludeHost: overrides.excludeHost ?? defaults.excludeHost,
 		httpStatusGroup: overrides.httpStatusGroup ?? defaults.httpStatusGroup,
-		shardColoMetrics:
-			overrides.shardColoMetrics ?? defaults.shardColoMetrics,
+		metricShards: overrides.metricShards ?? defaults.metricShards,
 		hostMetricsAllowlist:
 			overrides.hostMetricsAllowlist ?? defaults.hostMetricsAllowlist,
 		hostMetricsDelaySeconds:

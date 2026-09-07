@@ -87,7 +87,9 @@ app.get(env.METRICS_PATH, async (c) => {
 
 	try {
 		const coordinator = await MetricCoordinator.get(c.env);
-		const response = await coordinator.fetch("https://metric-coordinator/export");
+		const response = await coordinator.fetch(
+			"https://metric-coordinator/export",
+		);
 		if (response.ok) {
 			logger.info("Metrics export stream started successfully");
 		} else {
