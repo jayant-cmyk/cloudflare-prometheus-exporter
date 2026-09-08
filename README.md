@@ -56,6 +56,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `HEALTH_CHECK_CACHE_TTL_SECONDS` | 10 | Health check cache TTL |
 | `EXCLUDE_HOST` | false | Exclude host labels from metrics |
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
+| `COLO_METRICS_PACKED_STORAGE` | false | Enable compact by-zone storage and chunked read output for high-cardinality `colo-metrics` rollouts. Metric names and labels are unchanged. |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
 | `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
@@ -156,6 +157,7 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
+| `coloMetricsPackedStorage` | boolean | Enable compact by-zone storage and chunked read output for `colo-metrics` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
 
@@ -177,6 +179,11 @@ curl -X PUT https://your-worker.workers.dev/config/logLevel \
 curl -X PUT https://your-worker.workers.dev/config/cfZones \
   -H "Content-Type: application/json" \
   -d '{"value": "zone-id-1,zone-id-2"}'
+
+# Enable compact colo metric storage for trial rollout
+curl -X PUT https://your-worker.workers.dev/config/coloMetricsPackedStorage \
+  -H "Content-Type: application/json" \
+  -d '{"value": true}'
 
 # Reset to env default
 curl -X DELETE https://your-worker.workers.dev/config/logLevel

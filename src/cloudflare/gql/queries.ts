@@ -336,6 +336,38 @@ export const ColoMetricsQuery = graphql(`
   }
 `);
 
+export const ColoMetricsPackedStorageQuery = graphql(`
+  query ColoMetricsPackedStorage(
+    $zoneIDs: [string!]
+    $mintime: Time!
+    $maxtime: Time!
+    $limit: uint64!
+  ) {
+    viewer {
+      zones(filter: { zoneTag_in: $zoneIDs }) {
+        zoneTag
+        httpRequestsAdaptiveGroups(
+          limit: $limit
+          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+        ) {
+          count
+          avg {
+            sampleInterval
+          }
+          dimensions {
+            clientRequestHTTPHost
+            coloCode
+          }
+          sum {
+            edgeResponseBytes
+            visits
+          }
+        }
+      }
+    }
+  }
+`);
+
 export const ColoErrorMetricsQuery = graphql(`
   query ColoErrorMetrics(
     $zoneIDs: [string!]

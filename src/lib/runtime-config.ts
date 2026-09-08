@@ -28,6 +28,7 @@ export const ConfigKeySchema = z.enum([
 	// Output options
 	"excludeHost",
 	"httpStatusGroup",
+	"coloMetricsPackedStorage",
 	// Hostname metrics
 	"hostMetricsAllowlist",
 	"hostMetricsDelaySeconds",
@@ -58,6 +59,7 @@ const ConfigValueSchemas = {
 	metricsDenylist: z.string(),
 	excludeHost: z.boolean(),
 	httpStatusGroup: z.boolean(),
+	coloMetricsPackedStorage: z.boolean(),
 	hostMetricsAllowlist: z.string(),
 	hostMetricsDelaySeconds: z.number().int().min(30),
 } as const;
@@ -88,6 +90,8 @@ export const ConfigOverridesSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist.optional(),
 		excludeHost: ConfigValueSchemas.excludeHost.optional(),
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup.optional(),
+		coloMetricsPackedStorage:
+			ConfigValueSchemas.coloMetricsPackedStorage.optional(),
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
 		hostMetricsDelaySeconds:
 			ConfigValueSchemas.hostMetricsDelaySeconds.optional(),
@@ -121,6 +125,7 @@ export const ResolvedConfigSchema = z
 		metricsDenylist: ConfigValueSchemas.metricsDenylist,
 		excludeHost: ConfigValueSchemas.excludeHost,
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
+		coloMetricsPackedStorage: ConfigValueSchemas.coloMetricsPackedStorage,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
 		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
 	})
@@ -141,6 +146,7 @@ type OptionalEnvVars = {
 	CF_FREE_TIER_ACCOUNTS?: string;
 	HEALTH_CHECK_CACHE_TTL_SECONDS?: string;
 	HOST_METRICS_ALLOWLIST?: string;
+	COLO_METRICS_PACKED_STORAGE?: string;
 };
 
 /**
@@ -195,6 +201,10 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.boolean()
 			.catch(false)
 			.parse(env.CF_HTTP_STATUS_GROUP),
+		coloMetricsPackedStorage: z.coerce
+			.boolean()
+			.catch(false)
+			.parse(optionalEnv.COLO_METRICS_PACKED_STORAGE),
 		hostMetricsAllowlist: optionalEnv.HOST_METRICS_ALLOWLIST?.trim() ?? "",
 		hostMetricsDelaySeconds: z.coerce
 			.number()
@@ -285,6 +295,8 @@ function mergeConfig(
 		metricsDenylist: overrides.metricsDenylist ?? defaults.metricsDenylist,
 		excludeHost: overrides.excludeHost ?? defaults.excludeHost,
 		httpStatusGroup: overrides.httpStatusGroup ?? defaults.httpStatusGroup,
+		coloMetricsPackedStorage:
+			overrides.coloMetricsPackedStorage ?? defaults.coloMetricsPackedStorage,
 		hostMetricsAllowlist:
 			overrides.hostMetricsAllowlist ?? defaults.hostMetricsAllowlist,
 		hostMetricsDelaySeconds:

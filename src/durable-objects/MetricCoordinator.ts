@@ -4,18 +4,162 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import { serializeToPrometheus } from "../lib/prometheus";
+import {
+	type SerializeOptions,
+	serializeToPrometheus,
+} from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
+import type {
+	PackedColoMetricRow,
+	PackedColoMetricState,
+} from "./MetricExporter";
 
 const STATE_KEY = "state";
+const STREAM_CHUNK_TARGET_BYTES = 64 * 1024;
+
+const COLO_PACKED_METRICS = [
+	{
+		name: "cloudflare_zone_colocation_visits_total",
+		help: "Visits per colo",
+		valueKey: "visits",
+		missesKey: "visitsMisses",
+	},
+	{
+		name: "cloudflare_zone_colocation_edge_response_bytes_total",
+		help: "Edge response bytes per colo",
+		valueKey: "edgeResponseBytes",
+		missesKey: "edgeResponseBytesMisses",
+	},
+	{
+		name: "cloudflare_zone_colocation_requests_total",
+		help: "Requests per colo",
+		valueKey: "requests",
+		missesKey: "requestsMisses",
+	},
+] as const;
+
+type ColoPackedMetric = (typeof COLO_PACKED_METRICS)[number];
 
 type MetricCoordinatorState = {
 	identifier: string;
 	accounts: Account[];
 	lastAccountFetch: number;
 };
+
+function formatPackedColoValue(value: number): string {
+	if (Number.isNaN(value)) return "NaN";
+	if (!Number.isFinite(value)) return value > 0 ? "+Inf" : "-Inf";
+	return String(value);
+}
+
+function escapePackedColoLabel(value: string): string {
+	return value
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/\n/g, "\\n");
+}
+
+function packedColoLabels(
+	zone: string,
+	row: PackedColoMetricRow,
+	excludeHost: boolean,
+): string {
+	const labels = [
+		`zone="${escapePackedColoLabel(zone)}"`,
+		`colo="${escapePackedColoLabel(row.colo)}"`,
+	];
+	if (!excludeHost) {
+		labels.push(`host="${escapePackedColoLabel(row.host)}"`);
+	}
+	return `{${labels.join(",")}}`;
+}
+
+function packedColoMetricValue(
+	row: PackedColoMetricRow,
+	metric: ColoPackedMetric,
+): { value: number; misses: number } {
+	return { value: row[metric.valueKey], misses: row[metric.missesKey] };
+}
+
+function writePackedColoMetrics(
+	states: readonly PackedColoMetricState[],
+	options: SerializeOptions,
+	write: (output: string) => void,
+): void {
+	const denylist = options.denylist ?? new Set<string>();
+	const excludeHost = options.excludeLabels?.has("host") ?? false;
+	const includeHeaders = options.includeHeaders ?? true;
+	let buffer = "";
+
+	const flush = () => {
+		if (buffer.length === 0) return;
+		write(buffer);
+		buffer = "";
+	};
+	const writeLine = (line: string) => {
+		buffer += `${line}\n`;
+		if (buffer.length >= STREAM_CHUNK_TARGET_BYTES) flush();
+	};
+
+	for (const metric of COLO_PACKED_METRICS) {
+		if (denylist.has(metric.name)) continue;
+		let wroteSample = false;
+		if (includeHeaders) {
+			writeLine(`# HELP ${metric.name} ${metric.help}`);
+			writeLine(`# TYPE ${metric.name} counter`);
+		}
+
+		if (excludeHost) {
+			const aggregated = new Map<
+				string,
+				{ zone: string; row: PackedColoMetricRow; value: number }
+			>();
+			for (const state of states) {
+				for (const zoneBucket of state.zones) {
+					for (const row of zoneBucket.rows) {
+						const metricValue = packedColoMetricValue(row, metric);
+						if (metricValue.misses === 0) continue;
+						const key = `${zoneBucket.zone}\x00${row.colo}`;
+						const existing = aggregated.get(key);
+						if (existing === undefined) {
+							aggregated.set(key, {
+								zone: zoneBucket.zone,
+								row,
+								value: metricValue.value,
+							});
+						} else {
+							existing.value += metricValue.value;
+						}
+					}
+				}
+			}
+			for (const { zone, row, value } of aggregated.values()) {
+				wroteSample = true;
+				writeLine(
+					`${metric.name}${packedColoLabels(zone, row, true)} ${formatPackedColoValue(value)}`,
+				);
+			}
+		} else {
+			for (const state of states) {
+				for (const zoneBucket of state.zones) {
+					for (const row of zoneBucket.rows) {
+						const metricValue = packedColoMetricValue(row, metric);
+						if (metricValue.misses === 0) continue;
+						wroteSample = true;
+						writeLine(
+							`${metric.name}${packedColoLabels(zoneBucket.zone, row, false)} ${formatPackedColoValue(metricValue.value)}`,
+						);
+					}
+				}
+			}
+		}
+
+		if (wroteSample) writeLine("");
+	}
+	flush();
+}
 
 /**
  * Coordinates metrics collection across all Cloudflare accounts and maintains cached account list.
@@ -154,6 +298,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 		}
 
 		logger.info("Exporting metrics", { account_count: accounts.length });
+		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
+		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
 
 		// Track errors by account and error code
 		const errorsByAccount: Map<string, { code: string; count: number }[]> =
@@ -167,7 +313,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 						account.name,
 						this.env,
 					);
-					return await coordinator.export();
+					return await coordinator.exportForPrometheus();
 				} catch (error) {
 					const info = extractErrorInfo(error);
 					logger.error("Failed to export account", {
@@ -189,6 +335,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 
 					return {
 						metrics: [],
+						packedColoMetrics: [],
 						zoneCounts: {
 							total: 0,
 							filtered: 0,
@@ -208,8 +355,10 @@ export class MetricCoordinator extends DurableObject<Env> {
 			skippedFreeTier: 0,
 		};
 		const allMetrics: MetricDefinition[] = [];
+		const packedColoMetrics: PackedColoMetricState[] = [];
 		for (const result of results) {
 			allMetrics.push(...result.metrics);
+			packedColoMetrics.push(...result.packedColoMetrics);
 			zoneCounts.total += result.zoneCounts.total;
 			zoneCounts.filtered += result.zoneCounts.filtered;
 			zoneCounts.processed += result.zoneCounts.processed;
@@ -223,10 +372,158 @@ export class MetricCoordinator extends DurableObject<Env> {
 			errorsByAccount,
 		);
 
+		const serializedMetrics = serializeToPrometheus(
+			[...exporterMetrics, ...allMetrics],
+			{
+				denylist: metricsDenylist,
+				excludeLabels,
+			},
+		);
+		const packedOutput: string[] = [];
+		writePackedColoMetrics(
+			packedColoMetrics,
+			{ denylist: metricsDenylist, excludeLabels },
+			(output) => packedOutput.push(output),
+		);
+		return [...packedOutput, serializedMetrics]
+			.filter((output) => output.length > 0)
+			.join("\n");
+	}
+
+	override async fetch(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		if (url.pathname !== "/export") {
+			return new Response("Not Found", { status: 404 });
+		}
+
+		try {
+			return await this.exportResponse();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return new Response(`Error collecting metrics: ${message}`, {
+				status: 500,
+			});
+		}
+	}
+
+	private async exportResponse(): Promise<Response> {
+		const config = await getConfig(this.env);
+		const logger = this.createLogger(config);
+
+		logger.info("Collecting metrics");
+		const accounts = await this.refreshAccountsIfStale(config, logger);
+
+		if (accounts.length === 0) {
+			logger.warn("No accounts found");
+			return new Response("", {
+				headers: { "Content-Type": "text/plain; charset=utf-8" },
+			});
+		}
+
+		logger.info("Streaming metrics", { account_count: accounts.length });
+
+		return new Response(this.createExportStream(accounts, config, logger), {
+			headers: { "Content-Type": "text/plain; charset=utf-8" },
+		});
+	}
+
+	private createExportStream(
+		accounts: readonly Account[],
+		config: ResolvedConfig,
+		logger: Logger,
+	): ReadableStream<Uint8Array> {
+		const encoder = new TextEncoder();
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		return serializeToPrometheus([...exporterMetrics, ...allMetrics], {
-			denylist: metricsDenylist,
-			excludeLabels: config.excludeHost ? new Set(["host"]) : undefined,
+		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
+
+		return new ReadableStream({
+			start: async (controller) => {
+				const errorsByAccount: Map<string, { code: string; count: number }[]> =
+					new Map();
+				const zoneCounts = {
+					total: 0,
+					filtered: 0,
+					processed: 0,
+					skippedFreeTier: 0,
+				};
+
+				const writeRaw = (output: string) => {
+					if (output.length === 0) return;
+					controller.enqueue(encoder.encode(output));
+				};
+				const write = (output: string) => {
+					if (output.length === 0) return;
+					writeRaw(`${output}\n`);
+				};
+
+				try {
+					for (const account of accounts) {
+						try {
+							const coordinator = await AccountMetricCoordinator.get(
+								account.id,
+								account.name,
+								this.env,
+							);
+							const result = await coordinator.exportForPrometheus();
+							writePackedColoMetrics(
+								result.packedColoMetrics,
+								{
+									denylist: metricsDenylist,
+									excludeLabels,
+									includeHeaders: false,
+								},
+								writeRaw,
+							);
+							write(
+								serializeToPrometheus(result.metrics, {
+									denylist: metricsDenylist,
+									excludeLabels,
+									includeHeaders: false,
+								}),
+							);
+							zoneCounts.total += result.zoneCounts.total;
+							zoneCounts.filtered += result.zoneCounts.filtered;
+							zoneCounts.processed += result.zoneCounts.processed;
+							zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
+						} catch (error) {
+							const info = extractErrorInfo(error);
+							logger.error("Failed to export account", {
+								account_id: account.id,
+								error_code: info.code,
+								error: info.message,
+								...(info.stack && { stack: info.stack }),
+							});
+
+							const accountErrors = errorsByAccount.get(account.id) ?? [];
+							const existing = accountErrors.find((e) => e.code === info.code);
+							if (existing) {
+								existing.count++;
+							} else {
+								accountErrors.push({ code: info.code, count: 1 });
+							}
+							errorsByAccount.set(account.id, accountErrors);
+						}
+					}
+
+					write(
+						serializeToPrometheus(
+							this.buildExporterInfoMetrics(
+								accounts.length,
+								zoneCounts,
+								errorsByAccount,
+							),
+							{
+								denylist: metricsDenylist,
+								excludeLabels,
+							},
+						),
+					);
+					logger.info("Metrics streamed successfully");
+					controller.close();
+				} catch (error) {
+					controller.error(error);
+				}
+			},
 		});
 	}
 

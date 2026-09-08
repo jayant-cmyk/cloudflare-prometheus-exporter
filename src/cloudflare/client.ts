@@ -25,6 +25,7 @@ import {
 	AdaptiveMetricsQuery,
 	CacheMissMetricsQuery,
 	ColoErrorMetricsQuery,
+	ColoMetricsPackedStorageQuery,
 	ColoMetricsQuery,
 	EdgeCountryMetricsQuery,
 	HealthCheckMetricsQuery,
@@ -1487,6 +1488,7 @@ export class CloudflareMetricsClient {
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
 	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
 	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
+	 * @param coloMetricsPackedStorage Whether to use the reduced colo query for packed storage.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -1499,6 +1501,7 @@ export class CloudflareMetricsClient {
 		hostMetricsAllowlist?: ReadonlySet<string>,
 		hostMetricsDelaySeconds?: number,
 		httpStatusGroup = false,
+		coloMetricsPackedStorage = false,
 	): Promise<MetricDefinition[]> {
 		this.logger.info("Fetching zone metrics", {
 			query,
@@ -1519,7 +1522,12 @@ export class CloudflareMetricsClient {
 			case "edge-country-metrics":
 				return this.getEdgeCountryMetrics(zoneIds, zones, timeRange);
 			case "colo-metrics":
-				return this.getColoMetrics(zoneIds, zones, timeRange);
+				return this.getColoMetrics(
+					zoneIds,
+					zones,
+					timeRange,
+					coloMetricsPackedStorage,
+				);
 			case "colo-error-metrics":
 				return this.getColoErrorMetrics(zoneIds, zones, timeRange);
 			case "request-method-metrics":
@@ -2208,13 +2216,19 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		coloMetricsPackedStorage = false,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(ColoMetricsQuery, {
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
+		const result = await this.gql.query(
+			coloMetricsPackedStorage
+				? ColoMetricsPackedStorageQuery
+				: ColoMetricsQuery,
+			{
+				zoneIDs: zoneIds,
+				mintime: timeRange.mintime,
+				maxtime: timeRange.maxtime,
+				limit: this.config.queryLimit,
+			},
+		);
 
 		if (result.error) {
 			throw graphQLQueryError("colo-metrics", result.error);
