@@ -1,0 +1,21 @@
+src/lib/runtime-config.ts
+  s_8c4e0ce064e6ef::t_5d2f9c329fc037 31,62,93-94,128,149,204-207,298-299
+src/cloudflare/client.ts
+  s_8c4e0ce064e6ef::t_2eca09eeb55a4d 28,1491,1504,1525-1530,2219,2221-2231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6603978636b646f9dcf8d371eae01fbad7e1c7ba",
+  "prompts": {},
+  "sessions": {
+    "s_8c4e0ce064e6ef": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f92dcd3fdffemjm2G2vDVN8c11",
+        "model": "gpt-5.5"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
