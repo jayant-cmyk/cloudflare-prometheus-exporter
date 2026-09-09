@@ -19,29 +19,6 @@ import type {
 const STATE_KEY = "state";
 const STREAM_CHUNK_TARGET_BYTES = 64 * 1024;
 
-const COLO_PACKED_METRICS = [
-	{
-		name: "cloudflare_zone_colocation_visits_total",
-		help: "Visits per colo",
-		valueKey: "visits",
-		missesKey: "visitsMisses",
-	},
-	{
-		name: "cloudflare_zone_colocation_edge_response_bytes_total",
-		help: "Edge response bytes per colo",
-		valueKey: "edgeResponseBytes",
-		missesKey: "edgeResponseBytesMisses",
-	},
-	{
-		name: "cloudflare_zone_colocation_requests_total",
-		help: "Requests per colo",
-		valueKey: "requests",
-		missesKey: "requestsMisses",
-	},
-] as const;
-
-type ColoPackedMetric = (typeof COLO_PACKED_METRICS)[number];
-
 type MetricCoordinatorState = {
 	identifier: string;
 	accounts: Account[];
@@ -76,18 +53,32 @@ function packedColoLabels(
 	return `{${labels.join(",")}}`;
 }
 
-function packedColoMetricValue(
-	row: PackedColoMetricRow,
-	metric: ColoPackedMetric,
-): { value: number; misses: number } {
-	return { value: row[metric.valueKey], misses: row[metric.missesKey] };
-}
-
 function writePackedColoMetrics(
 	states: readonly PackedColoMetricState[],
 	options: SerializeOptions,
 	write: (output: string) => void,
 ): void {
+	const metrics = [
+		{
+			name: "cloudflare_zone_colocation_visits_total",
+			help: "Visits per colo",
+			valueKey: "visits",
+			missesKey: "visitsMisses",
+		},
+		{
+			name: "cloudflare_zone_colocation_edge_response_bytes_total",
+			help: "Edge response bytes per colo",
+			valueKey: "edgeResponseBytes",
+			missesKey: "edgeResponseBytesMisses",
+		},
+		{
+			name: "cloudflare_zone_colocation_requests_total",
+			help: "Requests per colo",
+			valueKey: "requests",
+			missesKey: "requestsMisses",
+		},
+	] as const;
+
 	const denylist = options.denylist ?? new Set<string>();
 	const excludeHost = options.excludeLabels?.has("host") ?? false;
 	let buffer = "";
@@ -102,7 +93,7 @@ function writePackedColoMetrics(
 		if (buffer.length >= STREAM_CHUNK_TARGET_BYTES) flush();
 	};
 
-	for (const metric of COLO_PACKED_METRICS) {
+	for (const metric of metrics) {
 		if (denylist.has(metric.name)) continue;
 		let wroteSample = false;
 		let wroteHeaders = false;
@@ -124,7 +115,10 @@ function writePackedColoMetrics(
 			for (const state of states) {
 				for (const zoneBucket of state.zones) {
 					for (const row of zoneBucket.rows) {
-						const metricValue = packedColoMetricValue(row, metric);
+						const metricValue = {
+							value: row[metric.valueKey],
+							misses: row[metric.missesKey],
+						};
 						if (metricValue.misses === 0) continue;
 						const key = `${zoneBucket.zone}\x00${row.colo}`;
 						const existing = aggregated.get(key);
@@ -149,7 +143,10 @@ function writePackedColoMetrics(
 			for (const state of states) {
 				for (const zoneBucket of state.zones) {
 					for (const row of zoneBucket.rows) {
-						const metricValue = packedColoMetricValue(row, metric);
+						const metricValue = {
+							value: row[metric.valueKey],
+							misses: row[metric.missesKey],
+						};
 						if (metricValue.misses === 0) continue;
 						writeSample(
 							`${metric.name}${packedColoLabels(zoneBucket.zone, row, false)} ${formatPackedColoValue(metricValue.value)}`,
