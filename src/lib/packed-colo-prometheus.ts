@@ -1,29 +1,13 @@
-import type { PackedColoMetricState } from "../durable-objects/MetricExporter";
+import {
+	PACKED_COLO_METRIC_FAMILIES,
+	type PackedColoMetricState,
+	type PackedColoValueColumn,
+} from "./packed-colo-state";
 import type { SerializeOptions } from "./prometheus";
 
 // UTF-8 uses at most three bytes per UTF-16 code unit. Leave room for a line
 // without constructing a second encoded copy merely to measure every buffer.
 const CHUNK_TARGET_CHARS = 16 * 1024;
-const COLO_METRIC_FAMILIES = [
-	{
-		name: "cloudflare_zone_colocation_visits_total",
-		help: "Visits per colo",
-		valueKey: "visits",
-		missesKey: "visitsMisses",
-	},
-	{
-		name: "cloudflare_zone_colocation_edge_response_bytes_total",
-		help: "Edge response bytes per colo",
-		valueKey: "edgeResponseBytes",
-		missesKey: "edgeResponseBytesMisses",
-	},
-	{
-		name: "cloudflare_zone_colocation_requests_total",
-		help: "Requests per colo",
-		valueKey: "requests",
-		missesKey: "requestsMisses",
-	},
-] as const;
 
 type ColoSample = { zone: string; colo: string; host: string; value: number };
 
@@ -42,17 +26,17 @@ function escapeColoLabel(value: string): string {
 
 function* coloSamples(
 	states: readonly PackedColoMetricState[],
-	metric: (typeof COLO_METRIC_FAMILIES)[number],
+	column: PackedColoValueColumn,
 ): Generator<ColoSample> {
 	for (const state of states) {
 		for (const bucket of state.zones) {
-			for (const row of bucket.rows) {
-				if (row[metric.missesKey] === 0) continue;
+			const values = bucket[column];
+			for (let i = 0; i < bucket.colo.length; i++) {
 				yield {
 					zone: bucket.zone,
-					colo: row.colo,
-					host: row.host,
-					value: row[metric.valueKey],
+					colo: bucket.colo[i] ?? "",
+					host: bucket.host[i] ?? "",
+					value: values[i] ?? 0,
 				};
 			}
 		}
@@ -77,9 +61,9 @@ function* coloMetricLines(
 	options: SerializeOptions,
 ): Generator<string> {
 	const excludeHost = options.excludeLabels?.has("host") ?? false;
-	for (const metric of COLO_METRIC_FAMILIES) {
+	for (const metric of PACKED_COLO_METRIC_FAMILIES) {
 		if (options.denylist?.has(metric.name)) continue;
-		const samples = coloSamples(states, metric);
+		const samples = coloSamples(states, metric.column);
 		let wroteHeaders = false;
 		for (const sample of excludeHost ? aggregateColoHosts(samples) : samples) {
 			if (!wroteHeaders) {

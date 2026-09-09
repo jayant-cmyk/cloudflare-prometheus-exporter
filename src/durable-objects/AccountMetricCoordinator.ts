@@ -12,10 +12,11 @@ import {
 } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
+import type { PackedColoMetricState } from "../lib/packed-colo-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import type { Zone } from "../lib/types";
-import { MetricExporter, type PackedColoMetricState } from "./MetricExporter";
+import { MetricExporter } from "./MetricExporter";
 
 const STATE_KEY = "state";
 
@@ -467,7 +468,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 		}
 		for (const state of packedColoMetrics) {
 			for (const zoneBucket of state.zones) {
-				if (zoneBucket.rows.length > 0) zonesWithMetrics.add(zoneBucket.zone);
+				if (zoneBucket.colo.length > 0) zonesWithMetrics.add(zoneBucket.zone);
 			}
 		}
 		const processedZones = zonesWithMetrics.size;

@@ -5,11 +5,11 @@ import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
 import { serializePackedColoMetrics } from "../lib/packed-colo-prometheus";
+import type { PackedColoMetricState } from "../lib/packed-colo-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
-import type { PackedColoMetricState } from "./MetricExporter";
 
 const STATE_KEY = "state";
 

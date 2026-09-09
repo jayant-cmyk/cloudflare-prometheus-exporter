@@ -1,75 +1,58 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MetricDefinition } from "../lib/metrics";
+import type {
+	PackedColoMetricState,
+	PackedColoZone,
+} from "../lib/packed-colo-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { MetricCoordinator } from "./MetricCoordinator";
-import type {
-	PackedColoMetricRow,
-	PackedColoMetricState,
-} from "./MetricExporter";
 
 const requestsName = "cloudflare_zone_colocation_requests_total";
 
-function packedRow(host: string, value = 10): PackedColoMetricRow {
-	return {
-		colo: "SJC",
-		host,
-		visits: value,
-		edgeResponseBytes: value,
-		requests: value,
-		visitsMisses: 5,
-		edgeResponseBytesMisses: 5,
-		requestsMisses: 5,
-		visitsLastIngest: 1,
-		edgeResponseBytesLastIngest: 1,
-		requestsLastIngest: 1,
-	};
-}
+type Row = { host: string; value: number; misses?: number };
 
-function packedState(rows: PackedColoMetricRow[]): PackedColoMetricState {
+function packedState(rows: Row[]): PackedColoMetricState {
+	const zone: PackedColoZone = {
+		zone: "example.com",
+		colo: rows.map(() => "SJC"),
+		host: rows.map((row) => row.host),
+		visits: rows.map((row) => row.value),
+		edgeResponseBytes: rows.map((row) => row.value),
+		requests: rows.map((row) => row.value),
+		misses: rows.map((row) => row.misses ?? 5),
+		lastIngest: rows.map(() => 1),
+	};
 	return {
-		format: "colo-packed-by-zone-v1",
+		format: "colo-packed-by-zone-v2",
 		accountId: "account-a",
 		accountName: "Account",
 		queryName: "colo-metrics",
 		lastFetch: 1,
 		lastIngest: 1,
-		zones: [{ zone: "example.com", rows }],
+		zones: [zone],
 	};
 }
 
 function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
 	return (
 		[
-			{
-				name: "cloudflare_zone_colocation_visits_total",
-				help: "Visits per colo",
-				field: "visits",
-				misses: "visitsMisses",
-			},
-			{
-				name: "cloudflare_zone_colocation_edge_response_bytes_total",
-				help: "Edge response bytes per colo",
-				field: "edgeResponseBytes",
-				misses: "edgeResponseBytesMisses",
-			},
-			{
-				name: requestsName,
-				help: "Requests per colo",
-				field: "requests",
-				misses: "requestsMisses",
-			},
+			["cloudflare_zone_colocation_visits_total", "Visits per colo", "visits"],
+			[
+				"cloudflare_zone_colocation_edge_response_bytes_total",
+				"Edge response bytes per colo",
+				"edgeResponseBytes",
+			],
+			[requestsName, "Requests per colo", "requests"],
 		] as const
-	).map(({ name, help, field, misses }) => ({
+	).map(([name, help, column]) => ({
 		name,
 		help,
 		type: "counter" as const,
 		values: state.zones.flatMap((zone) =>
-			zone.rows
-				.filter((row) => row[misses] > 0)
-				.map((row) => ({
-					labels: { zone: zone.zone, colo: row.colo, host: row.host },
-					value: row[field],
-				})),
+			zone.colo.map((colo, i) => ({
+				labels: { zone: zone.zone, colo, host: zone.host[i] ?? "" },
+				value: zone[column][i] ?? 0,
+			})),
 		),
 	}));
 }
@@ -145,8 +128,8 @@ describe("MetricCoordinator packed colo output", () => {
 		true,
 	])("matches legacy serialization including escaping and excludeHost=%s", async (excludeHost) => {
 		const state = packedState([
-			packedRow('www.\\\\"\nexample.com'),
-			packedRow("other.example.com", 20),
+			{ host: 'www.\\\\"\nexample.com', value: 10 },
+			{ host: "other.example.com", value: 20 },
 		]);
 		const coordinator = await createCoordinator([state], [], {
 			excludeHost,
@@ -166,16 +149,12 @@ describe("MetricCoordinator packed colo output", () => {
 		);
 	});
 
-	it("matches numeric formatting and omits expired counters", async () => {
-		const state = packedState([
-			...[
-				0,
-				Number.NaN,
-				Number.POSITIVE_INFINITY,
-				Number.NEGATIVE_INFINITY,
-			].map((value, index) => packedRow(`host-${index}.example.com`, value)),
-			{ ...packedRow("expired.example.com"), requestsMisses: 0 },
-		]);
+	it("matches numeric formatting for NaN and infinities", async () => {
+		const state = packedState(
+			[0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY].map(
+				(value, index) => ({ host: `host-${index}.example.com`, value }),
+			),
+		);
 		const coordinator = await createCoordinator([state]);
 		const response = await coordinator.fetch(
 			new Request("https://test/export"),
@@ -188,13 +167,20 @@ describe("MetricCoordinator packed colo output", () => {
 	it("does not serialize the whole packed snapshot before a slow reader consumes it", async () => {
 		let visitsRead = 0;
 		const rows = Array.from({ length: 5000 }, (_, index) => ({
-			...packedRow(`host-${index}.example.com`),
-			get visits() {
-				visitsRead++;
-				return 10;
-			},
+			host: `host-${index}.example.com`,
+			value: 10,
 		}));
-		const coordinator = await createCoordinator([packedState(rows)]);
+		const state = packedState(rows);
+		const zone = state.zones[0];
+		if (zone === undefined) throw new Error("fixture has no zone");
+		zone.visits = new Proxy(zone.visits, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/.test(property))
+					visitsRead++;
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const coordinator = await createCoordinator([state]);
 		const response = await coordinator.fetch(
 			new Request("https://test/export"),
 		);

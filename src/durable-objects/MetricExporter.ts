@@ -19,9 +19,14 @@ import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
 import {
 	type MetricDefinition,
 	MetricDefinitionSchema,
-	type MetricValue,
 	mergeMetricDefinitions,
 } from "../lib/metrics";
+import {
+	accumulatePackedColoRows,
+	COLO_METRICS_QUERY_NAME,
+	type PackedColoMetricState,
+	PackedColoMetricStateSchema,
+} from "../lib/packed-colo-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -36,52 +41,6 @@ import {
 const STATE_KEY = "state";
 const STATE_PACKED_COLO_METRICS_KEY = "packed-colo-metrics";
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
-const COLO_METRICS_QUERY_NAME = "colo-metrics";
-const DEFAULT_STALE_COUNTER_MISSES = 5;
-
-const PackedColoMetricRowSchema = z.object({
-	colo: z.string(),
-	host: z.string(),
-	visits: z.number(),
-	edgeResponseBytes: z.number(),
-	requests: z.number(),
-	visitsMisses: z.number().int().nonnegative(),
-	edgeResponseBytesMisses: z.number().int().nonnegative(),
-	requestsMisses: z.number().int().nonnegative(),
-	// Each packed counter tracks its own ingested window. A single row can be
-	// partially updated when Cloudflare returns only some metric values.
-	visitsLastIngest: z.number().default(0),
-	edgeResponseBytesLastIngest: z.number().default(0),
-	requestsLastIngest: z.number().default(0),
-});
-
-const PackedColoMetricZoneSchema = z.object({
-	zone: z.string(),
-	rows: z.array(PackedColoMetricRowSchema),
-});
-
-const PackedColoMetricStateSchema = z.object({
-	format: z.literal("colo-packed-by-zone-v1"),
-	accountId: z.string(),
-	accountName: z.string(),
-	queryName: z.literal(COLO_METRICS_QUERY_NAME),
-	lastFetch: z.number(),
-	lastIngest: z.number(),
-	zones: z.array(PackedColoMetricZoneSchema),
-});
-
-export type PackedColoMetricRow = z.infer<typeof PackedColoMetricRowSchema>;
-export type PackedColoMetricState = z.infer<typeof PackedColoMetricStateSchema>;
-
-type ObservedPackedColoMetricRow = {
-	zone: string;
-	colo: string;
-	host: string;
-	visits?: number;
-	edgeResponseBytes?: number;
-	requests?: number;
-};
-
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
  * Limits GraphQL variable size and prevents cardinality explosion.
@@ -126,171 +85,6 @@ type MetricFetchResult = {
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
 };
-
-function packedColoMetricKey(zone: string, colo: string, host: string): string {
-	return `${zone}\x00${colo}\x00${host}`;
-}
-
-function mapPackedColoRows(
-	state: PackedColoMetricState | undefined,
-): Map<string, { zone: string; row: PackedColoMetricRow }> {
-	const rows = new Map<string, { zone: string; row: PackedColoMetricRow }>();
-	for (const zoneBucket of state?.zones ?? []) {
-		for (const row of zoneBucket.rows) {
-			rows.set(packedColoMetricKey(zoneBucket.zone, row.colo, row.host), {
-				zone: zoneBucket.zone,
-				row,
-			});
-		}
-	}
-	return rows;
-}
-
-function addObservedColoMetricValue(
-	observed: Map<string, ObservedPackedColoMetricRow>,
-	metricName: string,
-	value: MetricValue,
-): void {
-	const zone = value.labels.zone ?? "";
-	const colo = value.labels.colo ?? "";
-	const host = value.labels.host ?? "";
-	const key = packedColoMetricKey(zone, colo, host);
-	const row = observed.get(key) ?? { zone, colo, host };
-	switch (metricName) {
-		case "cloudflare_zone_colocation_visits_total":
-			row.visits = (row.visits ?? 0) + value.value;
-			break;
-		case "cloudflare_zone_colocation_edge_response_bytes_total":
-			row.edgeResponseBytes = (row.edgeResponseBytes ?? 0) + value.value;
-			break;
-		case "cloudflare_zone_colocation_requests_total":
-			row.requests = (row.requests ?? 0) + value.value;
-			break;
-		default:
-			return;
-	}
-	observed.set(key, row);
-}
-
-function buildObservedPackedColoRows(
-	metrics: MetricDefinition[],
-): Map<string, ObservedPackedColoMetricRow> {
-	const observed = new Map<string, ObservedPackedColoMetricRow>();
-	for (const metric of metrics) {
-		for (const value of metric.values) {
-			addObservedColoMetricValue(observed, metric.name, value);
-		}
-	}
-	return observed;
-}
-
-function nextPackedCounterValue(
-	previousValue: number,
-	previousMisses: number,
-	previousLastIngest: number,
-	observedValue: number | undefined,
-	ingestId: number,
-	ageMissing: boolean,
-): { value: number; misses: number; lastIngest: number } {
-	if (observedValue !== undefined) {
-		// Retries can replay the same Cloudflare window; only add it once.
-		const alreadyIngested = previousLastIngest === ingestId;
-		return {
-			value: previousValue + (alreadyIngested ? 0 : observedValue),
-			misses: DEFAULT_STALE_COUNTER_MISSES,
-			lastIngest: ingestId,
-		};
-	}
-	if (previousMisses <= 0) {
-		return { value: 0, misses: 0, lastIngest: previousLastIngest };
-	}
-	if (!ageMissing || previousLastIngest === ingestId) {
-		// Failed scopes are not authoritative. The snapshot checkpoint controls
-		// aging on retries; per-counter checkpoints track observations only.
-		return {
-			value: previousValue,
-			misses: previousMisses,
-			lastIngest: previousLastIngest,
-		};
-	}
-	if (previousMisses > 1) {
-		return {
-			value: previousValue,
-			misses: previousMisses - 1,
-			lastIngest: previousLastIngest,
-		};
-	}
-	return { value: 0, misses: 0, lastIngest: previousLastIngest };
-}
-
-function buildPackedColoRow(
-	observed: ObservedPackedColoMetricRow,
-	previous: PackedColoMetricRow | undefined,
-	ingestId: number,
-	ageMissing: boolean,
-): PackedColoMetricRow | undefined {
-	const visits = nextPackedCounterValue(
-		previous?.visits ?? 0,
-		previous?.visitsMisses ?? 0,
-		previous?.visitsLastIngest ?? 0,
-		observed.visits,
-		ingestId,
-		ageMissing,
-	);
-	const edgeResponseBytes = nextPackedCounterValue(
-		previous?.edgeResponseBytes ?? 0,
-		previous?.edgeResponseBytesMisses ?? 0,
-		previous?.edgeResponseBytesLastIngest ?? 0,
-		observed.edgeResponseBytes,
-		ingestId,
-		ageMissing,
-	);
-	const requests = nextPackedCounterValue(
-		previous?.requests ?? 0,
-		previous?.requestsMisses ?? 0,
-		previous?.requestsLastIngest ?? 0,
-		observed.requests,
-		ingestId,
-		ageMissing,
-	);
-
-	if (
-		visits.misses === 0 &&
-		edgeResponseBytes.misses === 0 &&
-		requests.misses === 0
-	) {
-		return undefined;
-	}
-
-	return {
-		colo: observed.colo,
-		host: observed.host,
-		visits: visits.value,
-		edgeResponseBytes: edgeResponseBytes.value,
-		requests: requests.value,
-		visitsMisses: visits.misses,
-		edgeResponseBytesMisses: edgeResponseBytes.misses,
-		requestsMisses: requests.misses,
-		visitsLastIngest: visits.lastIngest,
-		edgeResponseBytesLastIngest: edgeResponseBytes.lastIngest,
-		requestsLastIngest: requests.lastIngest,
-	};
-}
-
-function groupPackedColoRowsByZone(
-	rows: Map<string, { zone: string; row: PackedColoMetricRow }>,
-): PackedColoMetricState["zones"] {
-	const zones = new Map<string, PackedColoMetricRow[]>();
-	for (const { zone, row } of rows.values()) {
-		const zoneRows = zones.get(zone) ?? [];
-		zoneRows.push(row);
-		zones.set(zone, zoneRows);
-	}
-	return [...zones.entries()].map(([zone, zoneRows]) => ({
-		zone,
-		rows: zoneRows,
-	}));
-}
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -988,54 +782,23 @@ export class MetricExporter extends DurableObject<Env> {
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
 		const previous = await this.loadPackedColoMetricState();
-		// Retries of the same window must not age absent counters twice.
-		const ageMissing = previous?.lastIngest !== ingestId;
-		const previousRows = mapPackedColoRows(previous);
-		const observedRows = buildObservedPackedColoRows(metrics);
-		const nextRows = new Map<
-			string,
-			{ zone: string; row: PackedColoMetricRow }
-		>();
-
-		for (const [key, observed] of observedRows) {
-			const previousRow = previousRows.get(key);
-			const row = buildPackedColoRow(
-				observed,
-				previousRow?.row,
-				ingestId,
-				ageMissing && !failedScopes.has(observed.zone),
-			);
-			if (row !== undefined) nextRows.set(key, { zone: observed.zone, row });
-		}
-
-		for (const [key, previousRow] of previousRows) {
-			if (observedRows.has(key)) continue;
-			const observed = {
-				zone: previousRow.zone,
-				colo: previousRow.row.colo,
-				host: previousRow.row.host,
-			};
-			const row = buildPackedColoRow(
-				observed,
-				previousRow.row,
-				ingestId,
-				ageMissing && !failedScopes.has(previousRow.zone),
-			);
-			if (row !== undefined) nextRows.set(key, { zone: previousRow.zone, row });
-		}
-
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
 			STATE_PACKED_COLO_METRICS_KEY,
 			{
-				format: "colo-packed-by-zone-v1",
+				format: "colo-packed-by-zone-v2",
 				accountId: state.accountId,
 				accountName: state.accountName,
 				queryName: COLO_METRICS_QUERY_NAME,
 				lastFetch: Date.now(),
 				lastIngest: ingestId,
-				zones: groupPackedColoRowsByZone(nextRows),
-			},
+				zones: accumulatePackedColoRows(
+					previous,
+					metrics,
+					ingestId,
+					failedScopes,
+				),
+			} satisfies PackedColoMetricState,
 		);
 	}
 

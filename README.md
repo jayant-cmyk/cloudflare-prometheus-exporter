@@ -194,10 +194,10 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 ### Packed colo storage
 
-`coloMetricsPackedStorage` stores `colo-metrics` as one row per unique `zone`/`colo`/`host` instead of three label-repeating metric families, and streams the output in bounded chunks. Metric names and labels are unchanged.
+`coloMetricsPackedStorage` stores `colo-metrics` in columnar form (one array per field, per zone) instead of three label-repeating metric families, and streams the output in bounded chunks. Metric names and labels are unchanged.
 
 - Toggling the flag in either direction **resets the colo counters** (Prometheus `rate()`/`increase()` handle counter resets). Colo metrics are absent for one refresh interval after enabling.
-- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies. Capacity is roughly 50,000 unique rows (150,000 samples) with typical hostnames.
+- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies. At ~55 bytes per unique `zone`/`colo`/`host` row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
 
 ## Available Metrics
 
