@@ -1,0 +1,21 @@
+src/durable-objects/AccountMetricCoordinator.ts
+  s_8c4e0ce064e6ef::t_55d66ca52d56df 401-404
+src/durable-objects/MetricExporter.ts
+  s_8c4e0ce064e6ef::t_39f82401367625 26,28,52-54,189,191,193,195,199-209,213-217,219,225,231,233,239,241,247,249,270-272,291-425,779-785,788-790,1130-1140,1152,1168,1229-1235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a51ec8763919ba5873aad0f8b2f6cf68ea018a17",
+  "prompts": {},
+  "sessions": {
+    "s_8c4e0ce064e6ef": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f92dcd3fdffemjm2G2vDVN8c11",
+        "model": "gpt-5.5"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
