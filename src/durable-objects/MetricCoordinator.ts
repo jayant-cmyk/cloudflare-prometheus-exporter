@@ -90,7 +90,6 @@ function writePackedColoMetrics(
 ): void {
 	const denylist = options.denylist ?? new Set<string>();
 	const excludeHost = options.excludeLabels?.has("host") ?? false;
-	const includeHeaders = options.includeHeaders ?? true;
 	let buffer = "";
 
 	const flush = () => {
@@ -106,10 +105,16 @@ function writePackedColoMetrics(
 	for (const metric of COLO_PACKED_METRICS) {
 		if (denylist.has(metric.name)) continue;
 		let wroteSample = false;
-		if (includeHeaders) {
-			writeLine(`# HELP ${metric.name} ${metric.help}`);
-			writeLine(`# TYPE ${metric.name} counter`);
-		}
+		let wroteHeaders = false;
+		const writeSample = (line: string) => {
+			if (!wroteHeaders) {
+				writeLine(`# HELP ${metric.name} ${metric.help}`);
+				writeLine(`# TYPE ${metric.name} counter`);
+				wroteHeaders = true;
+			}
+			wroteSample = true;
+			writeLine(line);
+		};
 
 		if (excludeHost) {
 			const aggregated = new Map<
@@ -136,8 +141,7 @@ function writePackedColoMetrics(
 				}
 			}
 			for (const { zone, row, value } of aggregated.values()) {
-				wroteSample = true;
-				writeLine(
+				writeSample(
 					`${metric.name}${packedColoLabels(zone, row, true)} ${formatPackedColoValue(value)}`,
 				);
 			}
@@ -147,8 +151,7 @@ function writePackedColoMetrics(
 					for (const row of zoneBucket.rows) {
 						const metricValue = packedColoMetricValue(row, metric);
 						if (metricValue.misses === 0) continue;
-						wroteSample = true;
-						writeLine(
+						writeSample(
 							`${metric.name}${packedColoLabels(zoneBucket.zone, row, false)} ${formatPackedColoValue(metricValue.value)}`,
 						);
 					}
@@ -446,6 +449,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 					processed: 0,
 					skippedFreeTier: 0,
 				};
+				const allMetrics: MetricDefinition[] = [];
+				const packedColoMetrics: PackedColoMetricState[] = [];
 
 				const writeRaw = (output: string) => {
 					if (output.length === 0) return;
@@ -465,22 +470,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 								this.env,
 							);
 							const result = await coordinator.exportForPrometheus();
-							writePackedColoMetrics(
-								result.packedColoMetrics,
-								{
-									denylist: metricsDenylist,
-									excludeLabels,
-									includeHeaders: false,
-								},
-								writeRaw,
-							);
-							write(
-								serializeToPrometheus(result.metrics, {
-									denylist: metricsDenylist,
-									excludeLabels,
-									includeHeaders: false,
-								}),
-							);
+							allMetrics.push(...result.metrics);
+							packedColoMetrics.push(...result.packedColoMetrics);
 							zoneCounts.total += result.zoneCounts.total;
 							zoneCounts.filtered += result.zoneCounts.filtered;
 							zoneCounts.processed += result.zoneCounts.processed;
@@ -505,13 +496,21 @@ export class MetricCoordinator extends DurableObject<Env> {
 						}
 					}
 
+					writePackedColoMetrics(
+						packedColoMetrics,
+						{ denylist: metricsDenylist, excludeLabels },
+						writeRaw,
+					);
 					write(
 						serializeToPrometheus(
-							this.buildExporterInfoMetrics(
-								accounts.length,
-								zoneCounts,
-								errorsByAccount,
-							),
+							[
+								...this.buildExporterInfoMetrics(
+									accounts.length,
+									zoneCounts,
+									errorsByAccount,
+								),
+								...allMetrics,
+							],
 							{
 								denylist: metricsDenylist,
 								excludeLabels,
