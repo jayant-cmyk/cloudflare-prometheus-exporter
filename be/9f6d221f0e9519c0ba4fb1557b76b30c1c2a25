@@ -1,0 +1,33 @@
+README.md
+  s_4bfd77419e8110::t_fec76b96d0652e 199-202
+src/durable-objects/AccountMetricCoordinator.ts
+  s_4bfd77419e8110::t_b9752781ad0bd5 329-330,332,366
+src/durable-objects/MetricCoordinator.test.ts
+  s_4bfd77419e8110::t_fda23bd23ee558 65-69,97-109,214-235
+src/durable-objects/MetricExporter.test.ts
+  s_4bfd77419e8110::t_4a5425a0267748 370-387
+src/durable-objects/MetricExporter.ts
+  s_4bfd77419e8110::t_da28003f76d71a 12,64,203,436,452-453,455-465,468,485-488,820-822
+src/lib/chunked-storage.ts
+  s_4bfd77419e8110::t_9417747a0802d7 154-169
+src/lib/metrics.test.ts
+  s_4bfd77419e8110::t_ca61b4e8a3f303 1-19
+src/lib/packed-colo-state.test.ts
+  s_4bfd77419e8110::t_01ff7f7f09ef68 1-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "be9f6d221f0e9519c0ba4fb1557b76b30c1c2a25",
+  "prompts": {},
+  "sessions": {
+    "s_4bfd77419e8110": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f793afb47ffe3AU5nlDU2Z5yJc",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
