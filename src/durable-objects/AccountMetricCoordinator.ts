@@ -398,9 +398,10 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 				});
 			}
 		}
-		const accountMetricQueries = usePackedColoMetrics
-			? accountQueries.filter((query) => query !== "colo-metrics")
-			: accountQueries;
+		const accountMetricQueries =
+			usePackedColoMetrics && packedColoMetrics.length > 0
+				? accountQueries.filter((query) => query !== "colo-metrics")
+				: accountQueries;
 
 		// Collect from account-scoped exporters
 		const accountMetricsResults = await Promise.all(

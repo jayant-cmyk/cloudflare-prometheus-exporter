@@ -23,8 +23,9 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
-import { getTimeRange } from "../lib/time";
+import { getTimeRange, metricKey } from "../lib/time";
 import {
+	type CounterState,
 	CounterStateSchema,
 	MetricExporterIdSchema,
 	type MetricExporterIdString,
@@ -48,6 +49,9 @@ const PackedColoMetricRowSchema = z.object({
 	visitsMisses: z.number().int().nonnegative(),
 	edgeResponseBytesMisses: z.number().int().nonnegative(),
 	requestsMisses: z.number().int().nonnegative(),
+	visitsLastIngest: z.number().default(0),
+	edgeResponseBytesLastIngest: z.number().default(0),
+	requestsLastIngest: z.number().default(0),
 });
 
 const PackedColoMetricZoneSchema = z.object({
@@ -182,49 +186,67 @@ function buildObservedPackedColoRows(
 function nextPackedCounterValue(
 	previousValue: number,
 	previousMisses: number,
+	previousLastIngest: number,
 	observedValue: number | undefined,
-	alreadyIngested: boolean,
+	ingestId: number,
 	ageMissing: boolean,
-): { value: number; misses: number } {
+): { value: number; misses: number; lastIngest: number } {
 	if (observedValue !== undefined) {
+		const alreadyIngested = previousLastIngest === ingestId;
 		return {
 			value: previousValue + (alreadyIngested ? 0 : observedValue),
 			misses: DEFAULT_STALE_COUNTER_MISSES,
+			lastIngest: ingestId,
 		};
 	}
-	if (previousMisses <= 0) return { value: 0, misses: 0 };
-	if (!ageMissing) return { value: previousValue, misses: previousMisses };
-	if (previousMisses > 1) {
-		return { value: previousValue, misses: previousMisses - 1 };
+	if (previousMisses <= 0) {
+		return { value: 0, misses: 0, lastIngest: previousLastIngest };
 	}
-	return { value: 0, misses: 0 };
+	if (!ageMissing || previousLastIngest === ingestId) {
+		return {
+			value: previousValue,
+			misses: previousMisses,
+			lastIngest: previousLastIngest,
+		};
+	}
+	if (previousMisses > 1) {
+		return {
+			value: previousValue,
+			misses: previousMisses - 1,
+			lastIngest: ingestId,
+		};
+	}
+	return { value: 0, misses: 0, lastIngest: ingestId };
 }
 
 function buildPackedColoRow(
 	observed: ObservedPackedColoMetricRow,
 	previous: PackedColoMetricRow | undefined,
-	alreadyIngested: boolean,
+	ingestId: number,
 	ageMissing: boolean,
 ): PackedColoMetricRow | undefined {
 	const visits = nextPackedCounterValue(
 		previous?.visits ?? 0,
 		previous?.visitsMisses ?? 0,
+		previous?.visitsLastIngest ?? 0,
 		observed.visits,
-		alreadyIngested,
+		ingestId,
 		ageMissing,
 	);
 	const edgeResponseBytes = nextPackedCounterValue(
 		previous?.edgeResponseBytes ?? 0,
 		previous?.edgeResponseBytesMisses ?? 0,
+		previous?.edgeResponseBytesLastIngest ?? 0,
 		observed.edgeResponseBytes,
-		alreadyIngested,
+		ingestId,
 		ageMissing,
 	);
 	const requests = nextPackedCounterValue(
 		previous?.requests ?? 0,
 		previous?.requestsMisses ?? 0,
+		previous?.requestsLastIngest ?? 0,
 		observed.requests,
-		alreadyIngested,
+		ingestId,
 		ageMissing,
 	);
 
@@ -245,6 +267,9 @@ function buildPackedColoRow(
 		visitsMisses: visits.misses,
 		edgeResponseBytesMisses: edgeResponseBytes.misses,
 		requestsMisses: requests.misses,
+		visitsLastIngest: visits.lastIngest,
+		edgeResponseBytesLastIngest: edgeResponseBytes.lastIngest,
+		requestsLastIngest: requests.lastIngest,
 	};
 }
 
@@ -261,6 +286,141 @@ function groupPackedColoRowsByZone(
 		zone,
 		rows: zoneRows,
 	}));
+}
+
+function legacyColoMetricsToPackedRows(
+	metrics: MetricDefinition[],
+	counters: Record<string, CounterState>,
+	fallbackLastIngest: number,
+): Map<string, { zone: string; row: PackedColoMetricRow }> {
+	const rows = new Map<string, { zone: string; row: PackedColoMetricRow }>();
+	for (const metric of metrics) {
+		for (const value of metric.values) {
+			const zone = value.labels.zone ?? "";
+			const colo = value.labels.colo ?? "";
+			const host = value.labels.host ?? "";
+			const key = packedColoMetricKey(zone, colo, host);
+			const existing = rows.get(key)?.row ?? {
+				colo,
+				host,
+				visits: 0,
+				edgeResponseBytes: 0,
+				requests: 0,
+				visitsMisses: 0,
+				edgeResponseBytesMisses: 0,
+				requestsMisses: 0,
+				visitsLastIngest: 0,
+				edgeResponseBytesLastIngest: 0,
+				requestsLastIngest: 0,
+			};
+			const counter = counters[metricKey(metric.name, value.labels)];
+			const misses = counter?.missesRemaining ?? DEFAULT_STALE_COUNTER_MISSES;
+			const lastIngest = counter?.lastIngest ?? fallbackLastIngest;
+			if (metric.name === "cloudflare_zone_colocation_visits_total") {
+				existing.visits = value.value;
+				existing.visitsMisses = misses;
+				existing.visitsLastIngest = lastIngest;
+			} else if (
+				metric.name === "cloudflare_zone_colocation_edge_response_bytes_total"
+			) {
+				existing.edgeResponseBytes = value.value;
+				existing.edgeResponseBytesMisses = misses;
+				existing.edgeResponseBytesLastIngest = lastIngest;
+			} else if (metric.name === "cloudflare_zone_colocation_requests_total") {
+				existing.requests = value.value;
+				existing.requestsMisses = misses;
+				existing.requestsLastIngest = lastIngest;
+			}
+			rows.set(key, { zone, row: existing });
+		}
+	}
+	return rows;
+}
+
+function packedColoStateToLegacyMetrics(
+	state: PackedColoMetricState,
+): MetricDefinition[] {
+	const visits: MetricDefinition = {
+		name: "cloudflare_zone_colocation_visits_total",
+		help: "Visits per colo",
+		type: "counter",
+		values: [],
+	};
+	const responseBytes: MetricDefinition = {
+		name: "cloudflare_zone_colocation_edge_response_bytes_total",
+		help: "Edge response bytes per colo",
+		type: "counter",
+		values: [],
+	};
+	const requests: MetricDefinition = {
+		name: "cloudflare_zone_colocation_requests_total",
+		help: "Requests per colo",
+		type: "counter",
+		values: [],
+	};
+
+	for (const zoneBucket of state.zones) {
+		for (const row of zoneBucket.rows) {
+			const labels = { zone: zoneBucket.zone, colo: row.colo, host: row.host };
+			if (row.visitsMisses > 0) {
+				visits.values.push({ labels, value: row.visits });
+			}
+			if (row.edgeResponseBytesMisses > 0) {
+				responseBytes.values.push({ labels, value: row.edgeResponseBytes });
+			}
+			if (row.requestsMisses > 0) {
+				requests.values.push({ labels, value: row.requests });
+			}
+		}
+	}
+
+	return [visits, responseBytes, requests].filter(
+		(metric) => metric.values.length > 0,
+	);
+}
+
+function packedColoStateToLegacyCounters(
+	state: PackedColoMetricState,
+): Record<string, CounterState> {
+	const counters: Record<string, CounterState> = {};
+	for (const zoneBucket of state.zones) {
+		for (const row of zoneBucket.rows) {
+			const labels = { zone: zoneBucket.zone, colo: row.colo, host: row.host };
+			if (row.visitsMisses > 0) {
+				counters[metricKey("cloudflare_zone_colocation_visits_total", labels)] =
+					{
+						accumulated: row.visits,
+						missesRemaining: row.visitsMisses,
+						lastIngest: row.visitsLastIngest,
+						scope: zoneBucket.zone,
+					};
+			}
+			if (row.edgeResponseBytesMisses > 0) {
+				counters[
+					metricKey(
+						"cloudflare_zone_colocation_edge_response_bytes_total",
+						labels,
+					)
+				] = {
+					accumulated: row.edgeResponseBytes,
+					missesRemaining: row.edgeResponseBytesMisses,
+					lastIngest: row.edgeResponseBytesLastIngest,
+					scope: zoneBucket.zone,
+				};
+			}
+			if (row.requestsMisses > 0) {
+				counters[
+					metricKey("cloudflare_zone_colocation_requests_total", labels)
+				] = {
+					accumulated: row.requests,
+					missesRemaining: row.requestsMisses,
+					lastIngest: row.requestsLastIngest,
+					scope: zoneBucket.zone,
+				};
+			}
+		}
+	}
+	return counters;
 }
 
 /**
@@ -616,9 +776,18 @@ export class MetricExporter extends DurableObject<Env> {
 				return;
 			}
 
+			const packedStateForLegacyCounters =
+				!config.coloMetricsPackedStorage &&
+				state.scopeType === "account" &&
+				state.queryName === COLO_METRICS_QUERY_NAME &&
+				Object.keys(state.counters).length === 0
+					? await this.loadPackedColoMetricState()
+					: undefined;
 			const processed = accumulateCounterMetrics(
 				result.metrics,
-				state.counters,
+				packedStateForLegacyCounters === undefined
+					? state.counters
+					: packedColoStateToLegacyCounters(packedStateForLegacyCounters),
 				{
 					ingestId,
 					ageMissingCounters: state.lastIngest !== ingestId,
@@ -958,7 +1127,17 @@ export class MetricExporter extends DurableObject<Env> {
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
 		const previous = await this.loadPackedColoMetricState();
-		const previousRows = mapPackedColoRows(previous);
+		const hasLegacyColoState =
+			state.metrics.length > 0 || Object.keys(state.counters).length > 0;
+		const previousRows =
+			previous === undefined ||
+			(hasLegacyColoState && state.lastIngest > previous.lastIngest)
+				? legacyColoMetricsToPackedRows(
+						state.metrics,
+						state.counters,
+						state.lastIngest,
+					)
+				: mapPackedColoRows(previous);
 		const observedRows = buildObservedPackedColoRows(metrics);
 		const nextRows = new Map<
 			string,
@@ -970,7 +1149,7 @@ export class MetricExporter extends DurableObject<Env> {
 			const row = buildPackedColoRow(
 				observed,
 				previousRow?.row,
-				state.lastIngest === ingestId && previousRow !== undefined,
+				ingestId,
 				state.lastIngest !== ingestId && !failedScopes.has(observed.zone),
 			);
 			if (row !== undefined) nextRows.set(key, { zone: observed.zone, row });
@@ -986,7 +1165,7 @@ export class MetricExporter extends DurableObject<Env> {
 			const row = buildPackedColoRow(
 				observed,
 				previousRow.row,
-				false,
+				ingestId,
 				state.lastIngest !== ingestId && !failedScopes.has(previousRow.zone),
 			);
 			if (row !== undefined) nextRows.set(key, { zone: previousRow.zone, row });
@@ -1045,6 +1224,13 @@ export class MetricExporter extends DurableObject<Env> {
 	): Promise<MetricDefinition[]> {
 		if (state.queryName !== COLO_METRICS_QUERY_NAME) {
 			return state.metrics;
+		}
+
+		if (state.metrics.length === 0) {
+			const packedState = await this.loadPackedColoMetricState();
+			if (packedState !== undefined) {
+				return packedColoStateToLegacyMetrics(packedState);
+			}
 		}
 
 		return state.metrics;

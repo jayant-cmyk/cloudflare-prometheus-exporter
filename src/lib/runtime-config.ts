@@ -149,6 +149,24 @@ type OptionalEnvVars = {
 	COLO_METRICS_PACKED_STORAGE?: string;
 };
 
+function parseBooleanEnv(value: unknown, fallback: boolean): boolean {
+	if (typeof value === "boolean") return value;
+	if (typeof value !== "string") return fallback;
+	switch (value.trim().toLowerCase()) {
+		case "true":
+		case "1":
+		case "yes":
+			return true;
+		case "false":
+		case "0":
+		case "no":
+		case "":
+			return false;
+		default:
+			return fallback;
+	}
+}
+
 /**
  * Gets default configuration values from environment variables.
  *
@@ -201,10 +219,10 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.boolean()
 			.catch(false)
 			.parse(env.CF_HTTP_STATUS_GROUP),
-		coloMetricsPackedStorage: z.coerce
-			.boolean()
-			.catch(false)
-			.parse(optionalEnv.COLO_METRICS_PACKED_STORAGE),
+		coloMetricsPackedStorage: parseBooleanEnv(
+			optionalEnv.COLO_METRICS_PACKED_STORAGE,
+			false,
+		),
 		hostMetricsAllowlist: optionalEnv.HOST_METRICS_ALLOWLIST?.trim() ?? "",
 		hostMetricsDelaySeconds: z.coerce
 			.number()
