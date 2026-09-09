@@ -49,6 +49,8 @@ const PackedColoMetricRowSchema = z.object({
 	visitsMisses: z.number().int().nonnegative(),
 	edgeResponseBytesMisses: z.number().int().nonnegative(),
 	requestsMisses: z.number().int().nonnegative(),
+	// Each packed counter tracks its own ingested window. A single row can be
+	// partially updated when Cloudflare returns only some metric values.
 	visitsLastIngest: z.number().default(0),
 	edgeResponseBytesLastIngest: z.number().default(0),
 	requestsLastIngest: z.number().default(0),
@@ -192,6 +194,7 @@ function nextPackedCounterValue(
 	ageMissing: boolean,
 ): { value: number; misses: number; lastIngest: number } {
 	if (observedValue !== undefined) {
+		// Retries can replay the same Cloudflare window; only add it once.
 		const alreadyIngested = previousLastIngest === ingestId;
 		return {
 			value: previousValue + (alreadyIngested ? 0 : observedValue),
@@ -203,6 +206,8 @@ function nextPackedCounterValue(
 		return { value: 0, misses: 0, lastIngest: previousLastIngest };
 	}
 	if (!ageMissing || previousLastIngest === ingestId) {
+		// Failed scopes are not authoritative, and stale aging should also be
+		// idempotent when retrying the same ingest window.
 		return {
 			value: previousValue,
 			misses: previousMisses,
@@ -293,6 +298,8 @@ function legacyColoMetricsToPackedRows(
 	counters: Record<string, CounterState>,
 	fallbackLastIngest: number,
 ): Map<string, { zone: string; row: PackedColoMetricRow }> {
+	// Used when enabling packed storage after the legacy path already accumulated
+	// counters. This seeds packed rows without resetting Prometheus counters.
 	const rows = new Map<string, { zone: string; row: PackedColoMetricRow }>();
 	for (const metric of metrics) {
 		for (const value of metric.values) {
@@ -340,6 +347,8 @@ function legacyColoMetricsToPackedRows(
 function packedColoStateToLegacyMetrics(
 	state: PackedColoMetricState,
 ): MetricDefinition[] {
+	// Used when disabling packed storage before the legacy path has rebuilt
+	// MetricDefinition[] state. Keeps colo metrics readable during rollout flips.
 	const visits: MetricDefinition = {
 		name: "cloudflare_zone_colocation_visits_total",
 		help: "Visits per colo",
@@ -382,6 +391,8 @@ function packedColoStateToLegacyMetrics(
 function packedColoStateToLegacyCounters(
 	state: PackedColoMetricState,
 ): Record<string, CounterState> {
+	// Used by the first legacy refresh after disabling packed storage so the
+	// normal counter accumulator continues from packed values instead of zero.
 	const counters: Record<string, CounterState> = {};
 	for (const zoneBucket of state.zones) {
 		for (const row of zoneBucket.rows) {
@@ -750,6 +761,8 @@ export class MetricExporter extends DurableObject<Env> {
 				state.queryName === COLO_METRICS_QUERY_NAME
 			) {
 				const currentState = this.getState();
+				// Packed colo counters live outside the generic MetricDefinition[] state.
+				// The helper preserves legacy accumulated values when the flag is enabled.
 				await this.savePackedColoMetricState(
 					result.metrics,
 					currentState,
@@ -776,6 +789,8 @@ export class MetricExporter extends DurableObject<Env> {
 				return;
 			}
 
+			// If packed storage is disabled after being enabled, generic counters may
+			// be empty. Seed them from packed state for the first legacy refresh.
 			const packedStateForLegacyCounters =
 				!config.coloMetricsPackedStorage &&
 				state.scopeType === "account" &&

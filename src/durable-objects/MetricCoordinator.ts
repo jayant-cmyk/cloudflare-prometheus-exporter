@@ -58,6 +58,8 @@ function writePackedColoMetrics(
 	options: SerializeOptions,
 	write: (output: string) => void,
 ): void {
+	// Packed colo state stores the three Prometheus families as fields on one row.
+	// Iterate family-first so output order matches the legacy serializer.
 	const metrics = [
 		{
 			name: "cloudflare_zone_colocation_visits_total",
@@ -108,6 +110,8 @@ function writePackedColoMetrics(
 		};
 
 		if (excludeHost) {
+			// Dropping host collapses multiple rows into the same Prometheus label set;
+			// counters must be summed to match serializeToPrometheus() behavior.
 			const aggregated = new Map<
 				string,
 				{ zone: string; row: PackedColoMetricRow; value: number }
@@ -357,6 +361,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 		const allMetrics: MetricDefinition[] = [];
 		const packedColoMetrics: PackedColoMetricState[] = [];
 		for (const result of results) {
+			// Account coordinators return packed colo separately; everything else
+			// stays in the normal MetricDefinition[] serializer path.
 			allMetrics.push(...result.metrics);
 			packedColoMetrics.push(...result.packedColoMetrics);
 			zoneCounts.total += result.zoneCounts.total;
@@ -380,6 +386,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 			},
 		);
 		const packedOutput: string[] = [];
+		// Legacy export still returns one string, so packed chunks are collected here
+		// and joined with the normal serialized output.
 		writePackedColoMetrics(
 			packedColoMetrics,
 			{ denylist: metricsDenylist, excludeLabels },
@@ -493,6 +501,8 @@ export class MetricCoordinator extends DurableObject<Env> {
 						}
 					}
 
+					// Write packed colo first and serialize all remaining metrics once.
+					// That keeps HELP/TYPE metadata emitted once per metric family.
 					writePackedColoMetrics(
 						packedColoMetrics,
 						{ denylist: metricsDenylist, excludeLabels },

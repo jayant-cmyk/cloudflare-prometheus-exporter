@@ -344,6 +344,10 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 		};
 	}
 
+	/**
+	 * Returns normal MetricDefinition[] data plus packed colo data separately.
+	 * During flag rollout, colo-metrics stay in `metrics` until packed state exists.
+	 */
 	async exportForPrometheus(): Promise<{
 		metrics: MetricDefinition[];
 		packedColoMetrics: PackedColoMetricState[];
@@ -399,6 +403,8 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			}
 		}
 		const accountMetricQueries =
+			// If packed state is not available yet, keep colo-metrics on the legacy
+			// read path so enabling the flag does not temporarily hide metrics.
 			usePackedColoMetrics && packedColoMetrics.length > 0
 				? accountQueries.filter((query) => query !== "colo-metrics")
 				: accountQueries;
