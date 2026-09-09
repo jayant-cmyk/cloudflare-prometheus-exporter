@@ -4,166 +4,20 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import {
-	type SerializeOptions,
-	serializeToPrometheus,
-} from "../lib/prometheus";
+import { serializePackedColoMetrics } from "../lib/packed-colo-prometheus";
+import { serializeToPrometheus } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
 import { AccountMetricCoordinator } from "./AccountMetricCoordinator";
-import type {
-	PackedColoMetricRow,
-	PackedColoMetricState,
-} from "./MetricExporter";
+import type { PackedColoMetricState } from "./MetricExporter";
 
 const STATE_KEY = "state";
-const STREAM_CHUNK_TARGET_BYTES = 64 * 1024;
 
 type MetricCoordinatorState = {
 	identifier: string;
 	accounts: Account[];
 	lastAccountFetch: number;
 };
-
-function formatPackedColoValue(value: number): string {
-	if (Number.isNaN(value)) return "NaN";
-	if (!Number.isFinite(value)) return value > 0 ? "+Inf" : "-Inf";
-	return String(value);
-}
-
-function escapePackedColoLabel(value: string): string {
-	return value
-		.replace(/\\/g, "\\\\")
-		.replace(/"/g, '\\"')
-		.replace(/\n/g, "\\n");
-}
-
-function packedColoLabels(
-	zone: string,
-	row: PackedColoMetricRow,
-	excludeHost: boolean,
-): string {
-	const labels = [
-		`zone="${escapePackedColoLabel(zone)}"`,
-		`colo="${escapePackedColoLabel(row.colo)}"`,
-	];
-	if (!excludeHost) {
-		labels.push(`host="${escapePackedColoLabel(row.host)}"`);
-	}
-	return `{${labels.join(",")}}`;
-}
-
-function writePackedColoMetrics(
-	states: readonly PackedColoMetricState[],
-	options: SerializeOptions,
-	write: (output: string) => void,
-): void {
-	// Packed colo state stores the three Prometheus families as fields on one row.
-	// Iterate family-first so output order matches the legacy serializer.
-	const metrics = [
-		{
-			name: "cloudflare_zone_colocation_visits_total",
-			help: "Visits per colo",
-			valueKey: "visits",
-			missesKey: "visitsMisses",
-		},
-		{
-			name: "cloudflare_zone_colocation_edge_response_bytes_total",
-			help: "Edge response bytes per colo",
-			valueKey: "edgeResponseBytes",
-			missesKey: "edgeResponseBytesMisses",
-		},
-		{
-			name: "cloudflare_zone_colocation_requests_total",
-			help: "Requests per colo",
-			valueKey: "requests",
-			missesKey: "requestsMisses",
-		},
-	] as const;
-
-	const denylist = options.denylist ?? new Set<string>();
-	const excludeHost = options.excludeLabels?.has("host") ?? false;
-	let buffer = "";
-
-	const flush = () => {
-		if (buffer.length === 0) return;
-		write(buffer);
-		buffer = "";
-	};
-	const writeLine = (line: string) => {
-		buffer += `${line}\n`;
-		if (buffer.length >= STREAM_CHUNK_TARGET_BYTES) flush();
-	};
-
-	for (const metric of metrics) {
-		if (denylist.has(metric.name)) continue;
-		let wroteSample = false;
-		let wroteHeaders = false;
-		const writeSample = (line: string) => {
-			if (!wroteHeaders) {
-				writeLine(`# HELP ${metric.name} ${metric.help}`);
-				writeLine(`# TYPE ${metric.name} counter`);
-				wroteHeaders = true;
-			}
-			wroteSample = true;
-			writeLine(line);
-		};
-
-		if (excludeHost) {
-			// Dropping host collapses multiple rows into the same Prometheus label set;
-			// counters must be summed to match serializeToPrometheus() behavior.
-			const aggregated = new Map<
-				string,
-				{ zone: string; row: PackedColoMetricRow; value: number }
-			>();
-			for (const state of states) {
-				for (const zoneBucket of state.zones) {
-					for (const row of zoneBucket.rows) {
-						const metricValue = {
-							value: row[metric.valueKey],
-							misses: row[metric.missesKey],
-						};
-						if (metricValue.misses === 0) continue;
-						const key = `${zoneBucket.zone}\x00${row.colo}`;
-						const existing = aggregated.get(key);
-						if (existing === undefined) {
-							aggregated.set(key, {
-								zone: zoneBucket.zone,
-								row,
-								value: metricValue.value,
-							});
-						} else {
-							existing.value += metricValue.value;
-						}
-					}
-				}
-			}
-			for (const { zone, row, value } of aggregated.values()) {
-				writeSample(
-					`${metric.name}${packedColoLabels(zone, row, true)} ${formatPackedColoValue(value)}`,
-				);
-			}
-		} else {
-			for (const state of states) {
-				for (const zoneBucket of state.zones) {
-					for (const row of zoneBucket.rows) {
-						const metricValue = {
-							value: row[metric.valueKey],
-							misses: row[metric.missesKey],
-						};
-						if (metricValue.misses === 0) continue;
-						writeSample(
-							`${metric.name}${packedColoLabels(zoneBucket.zone, row, false)} ${formatPackedColoValue(metricValue.value)}`,
-						);
-					}
-				}
-			}
-		}
-
-		if (wroteSample) writeLine("");
-	}
-	flush();
-}
 
 /**
  * Coordinates metrics collection across all Cloudflare accounts and maintains cached account list.
@@ -385,15 +239,14 @@ export class MetricCoordinator extends DurableObject<Env> {
 				excludeLabels,
 			},
 		);
-		const packedOutput: string[] = [];
-		// Legacy export still returns one string, so packed chunks are collected here
-		// and joined with the normal serialized output.
-		writePackedColoMetrics(
-			packedColoMetrics,
-			{ denylist: metricsDenylist, excludeLabels },
-			(output) => packedOutput.push(output),
-		);
-		return [...packedOutput, serializedMetrics]
+		// This RPC returns one string; the HTTP export streams the same chunks.
+		const packedOutput = [
+			...serializePackedColoMetrics(packedColoMetrics, {
+				denylist: metricsDenylist,
+				excludeLabels,
+			}),
+		].join("");
+		return [packedOutput, serializedMetrics]
 			.filter((output) => output.length > 0)
 			.join("\n");
 	}
@@ -441,96 +294,96 @@ export class MetricCoordinator extends DurableObject<Env> {
 		logger: Logger,
 	): ReadableStream<Uint8Array> {
 		const encoder = new TextEncoder();
-		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
-
+		const chunks = this.exportChunks(accounts, config, logger);
 		return new ReadableStream({
-			start: async (controller) => {
-				const errorsByAccount: Map<string, { code: string; count: number }[]> =
-					new Map();
-				const zoneCounts = {
-					total: 0,
-					filtered: 0,
-					processed: 0,
-					skippedFreeTier: 0,
-				};
-				const allMetrics: MetricDefinition[] = [];
-				const packedColoMetrics: PackedColoMetricState[] = [];
-
-				const writeRaw = (output: string) => {
-					if (output.length === 0) return;
-					controller.enqueue(encoder.encode(output));
-				};
-				const write = (output: string) => {
-					if (output.length === 0) return;
-					writeRaw(`${output}\n`);
-				};
-
+			async pull(controller) {
 				try {
-					for (const account of accounts) {
-						try {
-							const coordinator = await AccountMetricCoordinator.get(
-								account.id,
-								account.name,
-								this.env,
-							);
-							const result = await coordinator.exportForPrometheus();
-							allMetrics.push(...result.metrics);
-							packedColoMetrics.push(...result.packedColoMetrics);
-							zoneCounts.total += result.zoneCounts.total;
-							zoneCounts.filtered += result.zoneCounts.filtered;
-							zoneCounts.processed += result.zoneCounts.processed;
-							zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
-						} catch (error) {
-							const info = extractErrorInfo(error);
-							logger.error("Failed to export account", {
-								account_id: account.id,
-								error_code: info.code,
-								error: info.message,
-								...(info.stack && { stack: info.stack }),
-							});
-
-							const accountErrors = errorsByAccount.get(account.id) ?? [];
-							const existing = accountErrors.find((e) => e.code === info.code);
-							if (existing) {
-								existing.count++;
-							} else {
-								accountErrors.push({ code: info.code, count: 1 });
-							}
-							errorsByAccount.set(account.id, accountErrors);
-						}
-					}
-
-					// Write packed colo first and serialize all remaining metrics once.
-					// That keeps HELP/TYPE metadata emitted once per metric family.
-					writePackedColoMetrics(
-						packedColoMetrics,
-						{ denylist: metricsDenylist, excludeLabels },
-						writeRaw,
-					);
-					write(
-						serializeToPrometheus(
-							[
-								...this.buildExporterInfoMetrics(
-									accounts.length,
-									zoneCounts,
-									errorsByAccount,
-								),
-								...allMetrics,
-							],
-							{
-								denylist: metricsDenylist,
-								excludeLabels,
-							},
-						),
-					);
-					logger.info("Metrics streamed successfully");
-					controller.close();
+					const next = await chunks.next();
+					if (next.done) controller.close();
+					else controller.enqueue(encoder.encode(next.value));
 				} catch (error) {
 					controller.error(error);
 				}
 			},
+			async cancel() {
+				await chunks.return();
+			},
 		});
+	}
+
+	private async *exportChunks(
+		accounts: readonly Account[],
+		config: ResolvedConfig,
+		logger: Logger,
+	): AsyncGenerator<string, void> {
+		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
+		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
+
+		const errorsByAccount: Map<string, { code: string; count: number }[]> =
+			new Map();
+		const zoneCounts = {
+			total: 0,
+			filtered: 0,
+			processed: 0,
+			skippedFreeTier: 0,
+		};
+		const allMetrics: MetricDefinition[] = [];
+		const packedColoMetrics: PackedColoMetricState[] = [];
+
+		for (const account of accounts) {
+			try {
+				const coordinator = await AccountMetricCoordinator.get(
+					account.id,
+					account.name,
+					this.env,
+				);
+				const result = await coordinator.exportForPrometheus();
+				allMetrics.push(...result.metrics);
+				packedColoMetrics.push(...result.packedColoMetrics);
+				zoneCounts.total += result.zoneCounts.total;
+				zoneCounts.filtered += result.zoneCounts.filtered;
+				zoneCounts.processed += result.zoneCounts.processed;
+				zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
+			} catch (error) {
+				const info = extractErrorInfo(error);
+				logger.error("Failed to export account", {
+					account_id: account.id,
+					error_code: info.code,
+					error: info.message,
+					...(info.stack && { stack: info.stack }),
+				});
+
+				const accountErrors = errorsByAccount.get(account.id) ?? [];
+				const existing = accountErrors.find((e) => e.code === info.code);
+				if (existing) {
+					existing.count++;
+				} else {
+					accountErrors.push({ code: info.code, count: 1 });
+				}
+				errorsByAccount.set(account.id, accountErrors);
+			}
+		}
+
+		yield* serializePackedColoMetrics(packedColoMetrics, {
+			denylist: metricsDenylist,
+			excludeLabels,
+		});
+		const remaining = serializeToPrometheus(
+			[
+				...this.buildExporterInfoMetrics(
+					accounts.length,
+					zoneCounts,
+					errorsByAccount,
+				),
+				...allMetrics,
+			],
+			{
+				denylist: metricsDenylist,
+				excludeLabels,
+			},
+		);
+		if (remaining.length > 0) yield `${remaining}\n`;
+		logger.info("Metrics streamed successfully");
 	}
 
 	/**

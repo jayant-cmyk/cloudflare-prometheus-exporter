@@ -23,9 +23,8 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
-import { getTimeRange, metricKey } from "../lib/time";
+import { getTimeRange } from "../lib/time";
 import {
-	type CounterState,
 	CounterStateSchema,
 	MetricExporterIdSchema,
 	type MetricExporterIdString,
@@ -206,8 +205,8 @@ function nextPackedCounterValue(
 		return { value: 0, misses: 0, lastIngest: previousLastIngest };
 	}
 	if (!ageMissing || previousLastIngest === ingestId) {
-		// Failed scopes are not authoritative, and stale aging should also be
-		// idempotent when retrying the same ingest window.
+		// Failed scopes are not authoritative. The snapshot checkpoint controls
+		// aging on retries; per-counter checkpoints track observations only.
 		return {
 			value: previousValue,
 			misses: previousMisses,
@@ -218,10 +217,10 @@ function nextPackedCounterValue(
 		return {
 			value: previousValue,
 			misses: previousMisses - 1,
-			lastIngest: ingestId,
+			lastIngest: previousLastIngest,
 		};
 	}
-	return { value: 0, misses: 0, lastIngest: ingestId };
+	return { value: 0, misses: 0, lastIngest: previousLastIngest };
 }
 
 function buildPackedColoRow(
@@ -291,147 +290,6 @@ function groupPackedColoRowsByZone(
 		zone,
 		rows: zoneRows,
 	}));
-}
-
-function legacyColoMetricsToPackedRows(
-	metrics: MetricDefinition[],
-	counters: Record<string, CounterState>,
-	fallbackLastIngest: number,
-): Map<string, { zone: string; row: PackedColoMetricRow }> {
-	// Used when enabling packed storage after the legacy path already accumulated
-	// counters. This seeds packed rows without resetting Prometheus counters.
-	const rows = new Map<string, { zone: string; row: PackedColoMetricRow }>();
-	for (const metric of metrics) {
-		for (const value of metric.values) {
-			const zone = value.labels.zone ?? "";
-			const colo = value.labels.colo ?? "";
-			const host = value.labels.host ?? "";
-			const key = packedColoMetricKey(zone, colo, host);
-			const existing = rows.get(key)?.row ?? {
-				colo,
-				host,
-				visits: 0,
-				edgeResponseBytes: 0,
-				requests: 0,
-				visitsMisses: 0,
-				edgeResponseBytesMisses: 0,
-				requestsMisses: 0,
-				visitsLastIngest: 0,
-				edgeResponseBytesLastIngest: 0,
-				requestsLastIngest: 0,
-			};
-			const counter = counters[metricKey(metric.name, value.labels)];
-			const misses = counter?.missesRemaining ?? DEFAULT_STALE_COUNTER_MISSES;
-			const lastIngest = counter?.lastIngest ?? fallbackLastIngest;
-			if (metric.name === "cloudflare_zone_colocation_visits_total") {
-				existing.visits = value.value;
-				existing.visitsMisses = misses;
-				existing.visitsLastIngest = lastIngest;
-			} else if (
-				metric.name === "cloudflare_zone_colocation_edge_response_bytes_total"
-			) {
-				existing.edgeResponseBytes = value.value;
-				existing.edgeResponseBytesMisses = misses;
-				existing.edgeResponseBytesLastIngest = lastIngest;
-			} else if (metric.name === "cloudflare_zone_colocation_requests_total") {
-				existing.requests = value.value;
-				existing.requestsMisses = misses;
-				existing.requestsLastIngest = lastIngest;
-			}
-			rows.set(key, { zone, row: existing });
-		}
-	}
-	return rows;
-}
-
-function packedColoStateToLegacyMetrics(
-	state: PackedColoMetricState,
-): MetricDefinition[] {
-	// Used when disabling packed storage before the legacy path has rebuilt
-	// MetricDefinition[] state. Keeps colo metrics readable during rollout flips.
-	const visits: MetricDefinition = {
-		name: "cloudflare_zone_colocation_visits_total",
-		help: "Visits per colo",
-		type: "counter",
-		values: [],
-	};
-	const responseBytes: MetricDefinition = {
-		name: "cloudflare_zone_colocation_edge_response_bytes_total",
-		help: "Edge response bytes per colo",
-		type: "counter",
-		values: [],
-	};
-	const requests: MetricDefinition = {
-		name: "cloudflare_zone_colocation_requests_total",
-		help: "Requests per colo",
-		type: "counter",
-		values: [],
-	};
-
-	for (const zoneBucket of state.zones) {
-		for (const row of zoneBucket.rows) {
-			const labels = { zone: zoneBucket.zone, colo: row.colo, host: row.host };
-			if (row.visitsMisses > 0) {
-				visits.values.push({ labels, value: row.visits });
-			}
-			if (row.edgeResponseBytesMisses > 0) {
-				responseBytes.values.push({ labels, value: row.edgeResponseBytes });
-			}
-			if (row.requestsMisses > 0) {
-				requests.values.push({ labels, value: row.requests });
-			}
-		}
-	}
-
-	return [visits, responseBytes, requests].filter(
-		(metric) => metric.values.length > 0,
-	);
-}
-
-function packedColoStateToLegacyCounters(
-	state: PackedColoMetricState,
-): Record<string, CounterState> {
-	// Used by the first legacy refresh after disabling packed storage so the
-	// normal counter accumulator continues from packed values instead of zero.
-	const counters: Record<string, CounterState> = {};
-	for (const zoneBucket of state.zones) {
-		for (const row of zoneBucket.rows) {
-			const labels = { zone: zoneBucket.zone, colo: row.colo, host: row.host };
-			if (row.visitsMisses > 0) {
-				counters[metricKey("cloudflare_zone_colocation_visits_total", labels)] =
-					{
-						accumulated: row.visits,
-						missesRemaining: row.visitsMisses,
-						lastIngest: row.visitsLastIngest,
-						scope: zoneBucket.zone,
-					};
-			}
-			if (row.edgeResponseBytesMisses > 0) {
-				counters[
-					metricKey(
-						"cloudflare_zone_colocation_edge_response_bytes_total",
-						labels,
-					)
-				] = {
-					accumulated: row.edgeResponseBytes,
-					missesRemaining: row.edgeResponseBytesMisses,
-					lastIngest: row.edgeResponseBytesLastIngest,
-					scope: zoneBucket.zone,
-				};
-			}
-			if (row.requestsMisses > 0) {
-				counters[
-					metricKey("cloudflare_zone_colocation_requests_total", labels)
-				] = {
-					accumulated: row.requests,
-					missesRemaining: row.requestsMisses,
-					lastIngest: row.requestsLastIngest,
-					scope: zoneBucket.zone,
-				};
-			}
-		}
-	}
-	return counters;
 }
 
 /**
@@ -762,7 +620,6 @@ export class MetricExporter extends DurableObject<Env> {
 			) {
 				const currentState = this.getState();
 				// Packed colo counters live outside the generic MetricDefinition[] state.
-				// The helper preserves legacy accumulated values when the flag is enabled.
 				await this.savePackedColoMetricState(
 					result.metrics,
 					currentState,
@@ -789,20 +646,9 @@ export class MetricExporter extends DurableObject<Env> {
 				return;
 			}
 
-			// If packed storage is disabled after being enabled, generic counters may
-			// be empty. Seed them from packed state for the first legacy refresh.
-			const packedStateForLegacyCounters =
-				!config.coloMetricsPackedStorage &&
-				state.scopeType === "account" &&
-				state.queryName === COLO_METRICS_QUERY_NAME &&
-				Object.keys(state.counters).length === 0
-					? await this.loadPackedColoMetricState()
-					: undefined;
 			const processed = accumulateCounterMetrics(
 				result.metrics,
-				packedStateForLegacyCounters === undefined
-					? state.counters
-					: packedColoStateToLegacyCounters(packedStateForLegacyCounters),
+				state.counters,
 				{
 					ingestId,
 					ageMissingCounters: state.lastIngest !== ingestId,
@@ -1142,17 +988,9 @@ export class MetricExporter extends DurableObject<Env> {
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
 		const previous = await this.loadPackedColoMetricState();
-		const hasLegacyColoState =
-			state.metrics.length > 0 || Object.keys(state.counters).length > 0;
-		const previousRows =
-			previous === undefined ||
-			(hasLegacyColoState && state.lastIngest > previous.lastIngest)
-				? legacyColoMetricsToPackedRows(
-						state.metrics,
-						state.counters,
-						state.lastIngest,
-					)
-				: mapPackedColoRows(previous);
+		// Retries of the same window must not age absent counters twice.
+		const ageMissing = previous?.lastIngest !== ingestId;
+		const previousRows = mapPackedColoRows(previous);
 		const observedRows = buildObservedPackedColoRows(metrics);
 		const nextRows = new Map<
 			string,
@@ -1165,7 +1003,7 @@ export class MetricExporter extends DurableObject<Env> {
 				observed,
 				previousRow?.row,
 				ingestId,
-				state.lastIngest !== ingestId && !failedScopes.has(observed.zone),
+				ageMissing && !failedScopes.has(observed.zone),
 			);
 			if (row !== undefined) nextRows.set(key, { zone: observed.zone, row });
 		}
@@ -1181,7 +1019,7 @@ export class MetricExporter extends DurableObject<Env> {
 				observed,
 				previousRow.row,
 				ingestId,
-				state.lastIngest !== ingestId && !failedScopes.has(previousRow.zone),
+				ageMissing && !failedScopes.has(previousRow.zone),
 			);
 			if (row !== undefined) nextRows.set(key, { zone: previousRow.zone, row });
 		}
@@ -1216,13 +1054,10 @@ export class MetricExporter extends DurableObject<Env> {
 	 * @returns Current snapshot of metrics with accumulated counter values.
 	 */
 	async export(): Promise<MetricDefinition[]> {
-		const state = this.getState();
-		if (state.scopeType === "account") {
-			return this.exportAccountScopedMetrics(state);
-		}
-		return state.metrics;
+		return this.getState().metrics;
 	}
 
+	/** Packed colo counters, or undefined until the first packed refresh has run. */
 	async exportPackedColoMetrics(): Promise<PackedColoMetricState | undefined> {
 		const state = this.getState();
 		if (
@@ -1232,22 +1067,5 @@ export class MetricExporter extends DurableObject<Env> {
 			return undefined;
 		}
 		return this.loadPackedColoMetricState();
-	}
-
-	private async exportAccountScopedMetrics(
-		state: MetricExporterState,
-	): Promise<MetricDefinition[]> {
-		if (state.queryName !== COLO_METRICS_QUERY_NAME) {
-			return state.metrics;
-		}
-
-		if (state.metrics.length === 0) {
-			const packedState = await this.loadPackedColoMetricState();
-			if (packedState !== undefined) {
-				return packedColoStateToLegacyMetrics(packedState);
-			}
-		}
-
-		return state.metrics;
 	}
 }

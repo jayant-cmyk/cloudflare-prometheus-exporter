@@ -21,7 +21,7 @@ class AlarmStorage {
 
 	async put(entries: Record<string, unknown>): Promise<void> {
 		for (const [key, value] of Object.entries(entries)) {
-			this.values.set(key, value);
+			this.values.set(key, structuredClone(value));
 		}
 	}
 
@@ -216,4 +216,146 @@ describe("MetricExporter state recovery", () => {
 
 		await expect(exporter.export()).resolves.toEqual([]);
 	});
+});
+
+// Exercise real refresh, storage codecs, and GraphQL translation; only the
+// platform boundary and upstream HTTP response are replaced by local fixtures.
+async function createColoHarness(zoneCount = 1) {
+	const storage = new AlarmStorage();
+	const zone = {
+		id: "zone-id",
+		name: "example.com",
+		status: "active",
+		plan: { id: "paid", name: "Paid" },
+		account: { id: "account-id", name: "Account" },
+	};
+	const zones = Array.from({ length: zoneCount }, (_, index) => ({
+		...zone,
+		id: index === 0 ? zone.id : `zone-${index}`,
+		name: index === 0 ? zone.name : `zone-${index}.example.com`,
+	}));
+	storage.values.set("state", {
+		...storedState(),
+		queryName: "colo-metrics",
+		zones,
+	});
+	let packed = false;
+	let observations = [
+		{ host: "www.example.com", visits: 10, requests: 10, bytes: 10 },
+	];
+	const queries: string[] = [];
+	vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+		queries.push(String(init?.body));
+		return new Response(
+			JSON.stringify({
+				data: {
+					viewer: {
+						zones: zones.map((zone) => ({
+							zoneTag: zone.id,
+							httpRequestsAdaptiveGroups: observations.map((row) => ({
+								dimensions: {
+									coloCode: "SJC",
+									clientRequestHTTPHost: row.host,
+								},
+								count: row.requests,
+								sum: { visits: row.visits, edgeResponseBytes: row.bytes },
+							})),
+						})),
+					},
+				},
+			}),
+			{ headers: { "content-type": "application/json" } },
+		);
+	});
+	vi.spyOn(console, "log").mockImplementation(() => {});
+	const env = {
+		CLOUDFLARE_API_TOKEN: "test-token",
+		CONFIG_KV: {
+			get: async () => JSON.stringify({ coloMetricsPackedStorage: packed }),
+		},
+		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+	};
+	let { exporter, ready } = createExporter(storage, env);
+	await ready;
+	return {
+		storage,
+		queries,
+		get exporter() {
+			return exporter;
+		},
+		setPacked(enabled: boolean) {
+			packed = enabled;
+		},
+		setObservations(rows: typeof observations) {
+			observations = rows;
+		},
+		async restart() {
+			({ exporter, ready } = createExporter(storage, env));
+			await ready;
+		},
+		async refresh(minute: number) {
+			await exporter.triggerRefresh({
+				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
+				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
+			});
+		},
+		async requests() {
+			const packed = await exporter.exportPackedColoMetrics();
+			return packed?.zones[0]?.rows.map((row) => row.requests);
+		},
+	};
+}
+
+describe("MetricExporter packed colo storage", () => {
+	it("accumulates packed counters across refreshes and restarts without double-counting retries", async () => {
+		const h = await createColoHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		await h.refresh(2);
+		await h.restart();
+		await h.refresh(2);
+		expect(await h.requests()).toEqual([20]);
+		expect(
+			h.queries.every((query) => query.includes("ColoMetricsPackedStorage")),
+		).toBe(true);
+	});
+
+	it("expires packed counters absent for five refreshes, aging once per window", async () => {
+		const h = await createColoHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		h.setObservations([]);
+		await h.refresh(2);
+		await h.refresh(2);
+		expect(
+			(await h.exporter.exportPackedColoMetrics())?.zones[0]?.rows[0]
+				?.requestsMisses,
+		).toBe(4);
+		for (let minute = 3; minute <= 6; minute++) await h.refresh(minute);
+		expect((await h.exporter.exportPackedColoMetrics())?.zones).toEqual([]);
+	});
+
+	it("round-trips 50,000 packed rows (150,000 samples) within the storage guard", async () => {
+		const h = await createColoHarness(5);
+		h.setPacked(true);
+		h.setObservations(
+			Array.from({ length: 10_000 }, (_, index) => ({
+				host: `host-${index}.example.com`,
+				visits: 10,
+				requests: 10,
+				bytes: 10,
+			})),
+		);
+		await h.refresh(1);
+		await h.restart();
+		const snapshot = await h.exporter.exportPackedColoMetrics();
+		expect(
+			snapshot?.zones.reduce((total, zone) => total + zone.rows.length, 0),
+		).toBe(50_000);
+		const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+		expect(bytes).toBeLessThan(16 * 1024 * 1024);
+		expect(h.storage.values.get("packed-colo-metrics:manifest")).toMatchObject({
+			bytes,
+		});
+	}, 15_000);
 });

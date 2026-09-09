@@ -1,4 +1,6 @@
+import { parse, visit } from "graphql";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { ErrorCode } from "../lib/errors";
 import { CloudflareMetricsClient } from "./client";
 
@@ -13,6 +15,55 @@ function createClient(fetch: typeof globalThis.fetch): CloudflareMetricsClient {
 }
 
 describe("CloudflareMetricsClient", () => {
+	it.each([
+		false,
+		true,
+	])("only removes unused colo dimensions when packed storage=%s", async (packed) => {
+		const timeRange = {
+			mintime: "2026-01-01T00:00:00.000Z",
+			maxtime: "2026-01-01T00:01:00.000Z",
+		};
+		const fields: string[] = [];
+		const client = createClient(async (input, init) => {
+			const body = z
+				.object({
+					query: z.string(),
+					variables: z.object({ mintime: z.string(), maxtime: z.string() }),
+				})
+				.parse(await new Request(input, init).json());
+			expect(body.variables).toEqual(timeRange);
+			visit(parse(body.query), {
+				Field(node) {
+					fields.push(node.name.value);
+				},
+			});
+			return Response.json({ data: { viewer: { zones: [] } } });
+		});
+		await client.getZoneMetrics(
+			"colo-metrics",
+			["zone-id"],
+			[],
+			{},
+			timeRange,
+			undefined,
+			undefined,
+			false,
+			packed,
+		);
+		expect(fields).toEqual(
+			expect.arrayContaining([
+				"zoneTag",
+				"coloCode",
+				"clientRequestHTTPHost",
+				"count",
+				"visits",
+				"edgeResponseBytes",
+			]),
+		);
+		expect(fields.includes("datetime")).toBe(!packed);
+		expect(fields.includes("originResponseStatus")).toBe(!packed);
+	});
+
 	it.each([
 		"worker-totals",
 		"logpush-account",
