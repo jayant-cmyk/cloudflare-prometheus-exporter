@@ -1,0 +1,31 @@
+src/durable-objects/MetricCoordinator.test.ts
+  s_4bfd77419e8110::t_26c33f89c52dd6 22-23,26
+src/durable-objects/MetricCoordinator.ts
+  s_4bfd77419e8110::t_31ef9223a1bc38 217-219,232-233,258-261,263-270,276
+src/durable-objects/MetricExporter.test.ts
+  s_4bfd77419e8110::t_b8aa7e9fb03ea8 340
+src/durable-objects/MetricExporter.ts
+  s_4bfd77419e8110::t_3786684d79dcd9 796,801,832,844
+src/lib/packed-colo-prometheus.ts
+  s_4bfd77419e8110::t_35f3288b39961a 66,69,71
+src/lib/packed-colo-state.ts
+  s_4bfd77419e8110::t_9199ed99163623 16-23,32-33,38-39,95,103-111,118,120-127,131-143,146-150,157,160,169-173,176-178,180-199,201-204,209-210,212-213
+src/lib/prometheus.ts
+  s_4bfd77419e8110::t_a924a38630dd7a 62-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "83fcb130c38318b17b370d4029a8e5a1ecfa5255",
+  "prompts": {},
+  "sessions": {
+    "s_4bfd77419e8110": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f793afb47ffe3AU5nlDU2Z5yJc",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
