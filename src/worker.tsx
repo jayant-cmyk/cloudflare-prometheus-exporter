@@ -87,13 +87,6 @@ app.get(env.METRICS_PATH, async (c) => {
 
 	try {
 		const coordinator = await MetricCoordinator.get(c.env);
-		const runtimeConfig = await getConfig(c.env);
-		if (!runtimeConfig.coloMetricsPackedStorage) {
-			const metrics = await coordinator.export();
-			logger.info("Metrics exported successfully");
-			return c.text(metrics);
-		}
-
 		const response = await coordinator.fetch(
 			"https://metric-coordinator/export",
 		);

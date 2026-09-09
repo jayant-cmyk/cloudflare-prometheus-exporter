@@ -367,4 +367,22 @@ describe("MetricExporter packed colo storage", () => {
 			bytes,
 		});
 	}, 15_000);
+
+	it("starts a fresh packed generation after the flag was disabled", async () => {
+		const h = await createColoHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		expect(await h.requests()).toEqual([10]);
+		h.setPacked(false);
+		await h.refresh(2);
+		expect(await h.exporter.exportPackedColoMetrics()).toBeUndefined();
+		expect(
+			[...h.storage.values.keys()].filter((key) =>
+				key.startsWith("packed-colo-metrics"),
+			),
+		).toEqual([]);
+		h.setPacked(true);
+		await h.refresh(3);
+		expect(await h.requests()).toEqual([10]);
+	});
 });

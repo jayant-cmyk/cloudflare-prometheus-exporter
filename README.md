@@ -196,8 +196,10 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 `coloMetricsPackedStorage` stores `colo-metrics` in columnar form (one array per field, per zone) instead of three label-repeating metric families, and streams the output in bounded chunks. Metric names and labels are unchanged.
 
-- Toggling the flag in either direction **resets the colo counters** (Prometheus `rate()`/`increase()` handle counter resets). Colo metrics are absent for one refresh interval after enabling.
-- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies. At ~55 bytes per unique `zone`/`colo`/`host` row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
+- Toggling the flag in either direction **resets the colo counters** (Prometheus `rate()`/`increase()` handle counter resets). Disabling deletes the packed snapshot on the next refresh, so re-enabling starts from zero rather than reviving old totals. Colo metrics are absent until the first successful refresh in the new mode.
+- The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked colo output.
+- A `zone`/`colo`/`host` row is observed as a unit: the three counters share one retry checkpoint, and a counter Cloudflare omits for an observed row is recorded as `0`. Rows not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
+- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies. At ~55 bytes per unique row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
 
 ## Available Metrics
 

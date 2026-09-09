@@ -138,119 +138,6 @@ export class MetricCoordinator extends DurableObject<Env> {
 		return accounts;
 	}
 
-	/**
-	 * Collects metrics from all accounts and serializes to Prometheus format.
-	 *
-	 * @returns Prometheus-formatted metrics string.
-	 */
-	async export(): Promise<string> {
-		const config = await getConfig(this.env);
-		const logger = this.createLogger(config);
-
-		logger.info("Collecting metrics");
-		const accounts = await this.refreshAccountsIfStale(config, logger);
-
-		if (accounts.length === 0) {
-			logger.warn("No accounts found");
-			return "";
-		}
-
-		logger.info("Exporting metrics", { account_count: accounts.length });
-		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
-		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
-
-		// Track errors by account and error code
-		const errorsByAccount: Map<string, { code: string; count: number }[]> =
-			new Map();
-
-		const results = await Promise.all(
-			accounts.map(async (account) => {
-				try {
-					const coordinator = await AccountMetricCoordinator.get(
-						account.id,
-						account.name,
-						this.env,
-					);
-					return await coordinator.exportForPrometheus();
-				} catch (error) {
-					const info = extractErrorInfo(error);
-					logger.error("Failed to export account", {
-						account_id: account.id,
-						error_code: info.code,
-						error: info.message,
-						...(info.stack && { stack: info.stack }),
-					});
-
-					// Track error for metrics
-					const accountErrors = errorsByAccount.get(account.id) ?? [];
-					const existing = accountErrors.find((e) => e.code === info.code);
-					if (existing) {
-						existing.count++;
-					} else {
-						accountErrors.push({ code: info.code, count: 1 });
-					}
-					errorsByAccount.set(account.id, accountErrors);
-
-					return {
-						metrics: [],
-						packedColoMetrics: [],
-						zoneCounts: {
-							total: 0,
-							filtered: 0,
-							processed: 0,
-							skippedFreeTier: 0,
-						},
-					};
-				}
-			}),
-		);
-
-		// Aggregate stats
-		const zoneCounts = {
-			total: 0,
-			filtered: 0,
-			processed: 0,
-			skippedFreeTier: 0,
-		};
-		const allMetrics: MetricDefinition[] = [];
-		const packedColoMetrics: PackedColoMetricState[] = [];
-		for (const result of results) {
-			// Account coordinators return packed colo separately; everything else
-			// stays in the normal MetricDefinition[] serializer path.
-			allMetrics.push(...result.metrics);
-			packedColoMetrics.push(...result.packedColoMetrics);
-			zoneCounts.total += result.zoneCounts.total;
-			zoneCounts.filtered += result.zoneCounts.filtered;
-			zoneCounts.processed += result.zoneCounts.processed;
-			zoneCounts.skippedFreeTier += result.zoneCounts.skippedFreeTier;
-		}
-
-		// Add exporter info metrics
-		const exporterMetrics = this.buildExporterInfoMetrics(
-			accounts.length,
-			zoneCounts,
-			errorsByAccount,
-		);
-
-		const serializedMetrics = serializeToPrometheus(
-			[...exporterMetrics, ...allMetrics],
-			{
-				denylist: metricsDenylist,
-				excludeLabels,
-			},
-		);
-		// This RPC returns one string; the HTTP export streams the same chunks.
-		const packedOutput = [
-			...serializePackedColoMetrics(packedColoMetrics, {
-				denylist: metricsDenylist,
-				excludeLabels,
-			}),
-		].join("");
-		return [packedOutput, serializedMetrics]
-			.filter((output) => output.length > 0)
-			.join("\n");
-	}
-
 	override async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname !== "/export") {
@@ -337,7 +224,11 @@ export class MetricCoordinator extends DurableObject<Env> {
 					account.name,
 					this.env,
 				);
-				const result = await coordinator.exportForPrometheus();
+				// Resolve the storage mode once per scrape so every account serializes
+				// colo metrics the same way; mixed modes would duplicate HELP/TYPE lines.
+				const result = await coordinator.exportForPrometheus({
+					packedColoStorage: config.coloMetricsPackedStorage,
+				});
 				allMetrics.push(...result.metrics);
 				packedColoMetrics.push(...result.packedColoMetrics);
 				zoneCounts.total += result.zoneCounts.total;

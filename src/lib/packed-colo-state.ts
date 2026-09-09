@@ -11,16 +11,29 @@ const STALE_COUNTER_MISSES = 5;
  * Storing columns instead of objects removes per-row key names, keeping 150k
  * unique zone/colo/host rows under the 16 MiB state guard and 32 MiB RPC cap.
  */
-const PackedColoZoneSchema = z.object({
-	zone: z.string(),
-	colo: z.array(z.string()),
-	host: z.array(z.string()),
-	visits: z.array(z.number()),
-	edgeResponseBytes: z.array(z.number()),
-	requests: z.array(z.number()),
-	misses: z.array(z.number().int().nonnegative()),
-	lastIngest: z.array(z.number()),
-});
+const PackedColoZoneSchema = z
+	.object({
+		zone: z.string(),
+		colo: z.array(z.string()),
+		host: z.array(z.string()),
+		visits: z.array(z.number()),
+		edgeResponseBytes: z.array(z.number()),
+		requests: z.array(z.number()),
+		misses: z.array(z.number().int().nonnegative()),
+		lastIngest: z.array(z.number()),
+	})
+	.refine(
+		(zone) =>
+			[
+				zone.host,
+				zone.visits,
+				zone.edgeResponseBytes,
+				zone.requests,
+				zone.misses,
+				zone.lastIngest,
+			].every((column) => column.length === zone.colo.length),
+		{ message: "Packed colo zone columns must have equal length" },
+	);
 
 export const PackedColoMetricStateSchema = z.object({
 	format: z.literal("colo-packed-by-zone-v2"),

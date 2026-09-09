@@ -325,31 +325,11 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 	}
 
 	/**
-	 * Collects and aggregates metrics from all MetricExporter DOs.
-	 *
-	 * @returns Metrics and zone counts.
-	 */
-	async export(): Promise<{
-		metrics: MetricDefinition[];
-		zoneCounts: {
-			total: number;
-			filtered: number;
-			processed: number;
-			skippedFreeTier: number;
-		};
-	}> {
-		const result = await this.exportForPrometheus();
-		return {
-			metrics: result.metrics,
-			zoneCounts: result.zoneCounts,
-		};
-	}
-
-	/**
 	 * Returns normal MetricDefinition[] data plus packed colo data separately.
-	 * With packed storage enabled, colo-metrics are read only from packed state.
+	 * The caller decides the colo storage mode for the whole scrape; with packed
+	 * storage, colo-metrics are read only from packed state.
 	 */
-	async exportForPrometheus(): Promise<{
+	async exportForPrometheus(options: { packedColoStorage: boolean }): Promise<{
 		metrics: MetricDefinition[];
 		packedColoMetrics: PackedColoMetricState[];
 		zoneCounts: {
@@ -383,8 +363,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 
 		const accountQueries = getActiveAccountQueries(config, isFreeTierAccount);
 		const usePackedColoMetrics =
-			config.coloMetricsPackedStorage &&
-			accountQueries.includes("colo-metrics");
+			options.packedColoStorage && accountQueries.includes("colo-metrics");
 		let packedColoMetrics: PackedColoMetricState[] = [];
 		if (usePackedColoMetrics) {
 			try {

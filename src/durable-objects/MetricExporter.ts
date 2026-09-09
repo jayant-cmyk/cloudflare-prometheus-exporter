@@ -9,6 +9,7 @@ import { isPaidTierGraphQLQuery } from "../cloudflare/queries";
 import { runAlarmWithRecovery } from "../lib/alarm-recovery";
 import {
 	chunkedDurableObjectStorage,
+	deleteChunkedValue,
 	loadChunkedValue,
 	saveChunkedValue,
 } from "../lib/chunked-storage";
@@ -440,6 +441,17 @@ export class MetricExporter extends DurableObject<Env> {
 				return;
 			}
 
+			if (
+				state.scopeType === "account" &&
+				state.queryName === COLO_METRICS_QUERY_NAME
+			) {
+				// Packed storage is off: drop any packed snapshot so re-enabling the
+				// flag starts a fresh counter generation instead of reviving old totals.
+				await deleteChunkedValue(
+					chunkedDurableObjectStorage(this.ctx.storage),
+					STATE_PACKED_COLO_METRICS_KEY,
+				);
+			}
 			const processed = accumulateCounterMetrics(
 				result.metrics,
 				state.counters,

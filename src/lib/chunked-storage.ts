@@ -151,6 +151,22 @@ export async function loadChunkedValue<T>(
 	return schema.parse(parsed);
 }
 
+/** Deletes a chunked value, its manifest, and any pending generation. */
+export async function deleteChunkedValue(
+	storage: ChunkedValueStorage,
+	baseKey: string,
+): Promise<void> {
+	const current = await readCurrentValues(storage, baseKey);
+	if (current.manifest !== undefined) {
+		for (const keyBatch of batches(chunkKeys(baseKey, current.manifest))) {
+			await storage.deleteMany(keyBatch);
+		}
+	}
+	await cleanupPendingGeneration(storage, baseKey, 0);
+	await cleanupPendingGeneration(storage, baseKey, 1);
+	await storage.deleteMany([baseKey, manifestKey(baseKey)]);
+}
+
 /**
  * Persists a value in bounded chunks and atomically switches a manifest pointer.
  * The legacy base value is retained while state is large, allowing rollback to an

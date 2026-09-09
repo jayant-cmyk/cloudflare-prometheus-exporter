@@ -60,7 +60,11 @@ function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
 async function createCoordinator(
 	packed: PackedColoMetricState[],
 	legacy: MetricDefinition[] = [],
-	overrides: { excludeHost?: boolean; metricsDenylist?: string } = {},
+	overrides: {
+		excludeHost?: boolean;
+		metricsDenylist?: string;
+		coloMetricsPackedStorage?: boolean;
+	} = {},
 ) {
 	let ready = Promise.resolve();
 	const ctx = {
@@ -88,9 +92,19 @@ async function createCoordinator(
 		AccountMetricCoordinator: {
 			getByName: (id: string) => ({
 				initialize: async () => {},
-				exportForPrometheus: async () => ({
-					metrics: id === "account:account-a" ? [] : legacy,
-					packedColoMetrics: id === "account:account-a" ? packed : [],
+				// Mirrors AccountMetricCoordinator: the caller's mode decides which
+				// representation colo metrics use for this scrape.
+				exportForPrometheus: async (options: {
+					packedColoStorage: boolean;
+				}) => ({
+					metrics:
+						id === "account:account-a" || options.packedColoStorage
+							? []
+							: legacy,
+					packedColoMetrics:
+						id === "account:account-a" && options.packedColoStorage
+							? packed
+							: [],
 					zoneCounts: {
 						total: 1,
 						filtered: 1,
@@ -194,5 +208,27 @@ describe("MetricCoordinator packed colo output", () => {
 		const readsAtCancel = visitsRead;
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(visitsRead).toBe(readsAtCancel);
+	});
+
+	it("passes one storage mode to every account so HELP/TYPE appear once", async () => {
+		const legacy = expectedMetrics(
+			packedState([{ host: "b.example.com", value: 1 }]),
+		);
+		for (const coloMetricsPackedStorage of [true, false]) {
+			const coordinator = await createCoordinator(
+				[packedState([{ host: "a.example.com", value: 1 }])],
+				legacy,
+				{ coloMetricsPackedStorage },
+			);
+			const text = await (
+				await coordinator.fetch(new Request("https://test/export"))
+			).text();
+			expect(
+				text.match(/^# HELP cloudflare_zone_colocation_requests_total/gm),
+			).toHaveLength(1);
+			expect(
+				text.match(/^# TYPE cloudflare_zone_colocation_requests_total/gm),
+			).toHaveLength(1);
+		}
 	});
 });
