@@ -1,0 +1,19 @@
+src/durable-objects/MetricCoordinator.ts
+  s_4bfd77419e8110::t_434babd92aa481 56-105,108,136-144,147-150,153-156,158-164,381-390,396,447,450,452-454,459-461,465-547
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8e69033dde5bdfc21a78d4086bad94a33cf7e1dc",
+  "prompts": {},
+  "sessions": {
+    "s_4bfd77419e8110": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f793afb47ffe3AU5nlDU2Z5yJc",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
