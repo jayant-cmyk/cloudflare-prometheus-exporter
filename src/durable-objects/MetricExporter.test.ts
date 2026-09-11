@@ -343,6 +343,31 @@ describe("MetricExporter packed colo storage", () => {
 		expect((await h.exporter.exportPackedColoMetrics())?.zones).toEqual([]);
 	});
 
+	it("round-trips 150,000 packed rows (450,000 samples) within the storage guard", async () => {
+		const h = await createColoHarness(15);
+		h.setPacked(true);
+		h.setObservations(
+			Array.from({ length: 10_000 }, (_, index) => ({
+				host: `host-${index}.example.com`,
+				visits: 10,
+				requests: 10,
+				bytes: 10,
+			})),
+		);
+		await h.refresh(1);
+		await h.restart();
+		expect(h.storage.values.get("state")).toMatchObject({ lastError: null });
+		const snapshot = await h.exporter.exportPackedColoMetrics();
+		expect(
+			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
+		).toBe(150_000);
+		const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+		expect(bytes).toBeLessThan(16 * 1024 * 1024);
+		expect(h.storage.values.get("packed-colo-metrics:manifest")).toMatchObject({
+			bytes,
+		});
+	}, 15_000);
+
 	it("starts a fresh packed generation after the flag was disabled", async () => {
 		const h = await createColoHarness();
 		h.setPacked(true);

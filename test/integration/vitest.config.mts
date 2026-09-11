@@ -5,7 +5,9 @@ export default defineConfig({
 	plugins: [
 		cloudflareTest({
 			wrangler: {
-				configPath: process.env.COLO_TEST_CONFIG ?? "./wrangler.test.jsonc",
+				configPath:
+					process.env.COLO_TEST_CONFIG ??
+					"./test/integration/wrangler.test.jsonc",
 			},
 		}),
 	],
