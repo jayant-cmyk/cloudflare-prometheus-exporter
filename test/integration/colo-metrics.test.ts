@@ -8,48 +8,42 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CLOUDFLARE_GQL_URL } from "../../src/cloudflare/client";
 import type { MetricExporter } from "../../src/durable-objects/MetricExporter";
+import { COLO_METRIC_SCENARIOS, type ColoMetricScenario } from "./scenarios";
 
 const network = setupNetwork();
-const sampleValue = 10;
+
+function createColoGroups(scenario: ColoMetricScenario) {
+	const { colosPerZone, hostsPerColo, trafficPerHost } = scenario.scale;
+	return Array.from({ length: colosPerZone }, (_, coloIndex) =>
+		Array.from({ length: hostsPerColo }, (_, hostIndex) => ({
+			dimensions: {
+				coloCode: `COLO-${coloIndex}`,
+				clientRequestHTTPHost: `host-${coloIndex}-${hostIndex}.example.com`,
+			},
+			count: trafficPerHost.requests,
+			sum: {
+				visits: trafficPerHost.visits,
+				edgeResponseBytes: trafficPerHost.responseBytes,
+			},
+		})),
+	).flat();
+}
 
 beforeAll(() => network.enable());
 afterEach(() => network.resetHandlers());
 afterAll(() => network.disable());
 
 describe("colo-metrics Durable Object", () => {
-	it.each([
-		{
-			name: "100-row account",
-			accountId: "account-small",
-			zoneCount: 1,
-			rowsPerZone: 100,
-		},
-		{
-			name: "150000-row account",
-			accountId: "account-large",
-			zoneCount: 15,
-			rowsPerZone: 10_000,
-		},
-	])("refreshes and reads $name", async ({
-		accountId,
-		zoneCount,
-		rowsPerZone,
-	}) => {
-		const zones = Array.from({ length: zoneCount }, (_, index) => ({
+	it.each(COLO_METRIC_SCENARIOS)("$path $name", async (scenario) => {
+		const accountId = scenario.name.replaceAll(" ", "-");
+		const zones = Array.from({ length: scenario.scale.zones }, (_, index) => ({
 			id: `${accountId}-zone-${index}`,
 			name: `${accountId}-zone-${index}.example.com`,
 			status: "active",
 			plan: { id: "paid", name: "Paid" },
 			account: { id: accountId, name: accountId },
 		}));
-		const groups = Array.from({ length: rowsPerZone }, (_, index) => ({
-			dimensions: {
-				coloCode: "SJC",
-				clientRequestHTTPHost: `host-${index}.example.com`,
-			},
-			count: sampleValue,
-			sum: { visits: sampleValue, edgeResponseBytes: sampleValue },
-		}));
+		const groups = createColoGroups(scenario);
 		let graphQLRequests = 0;
 		network.use(
 			http.post(CLOUDFLARE_GQL_URL, async ({ request }) => {
@@ -72,10 +66,9 @@ describe("colo-metrics Durable Object", () => {
 				});
 			}),
 		);
-		const stub = env.MetricExporter.getByName(
-			`account:${accountId}:colo-metrics`,
-		);
-		await stub.initialize(`account:${accountId}:colo-metrics`);
+		const exporterId = `account:${accountId}:${scenario.path.metric}`;
+		const stub = env.MetricExporter.getByName(exporterId);
+		await stub.initialize(exporterId);
 		await stub.updateZoneContext(
 			accountId,
 			accountId,
@@ -97,19 +90,33 @@ describe("colo-metrics Durable Object", () => {
 			},
 		);
 		expect(lastError).toBeNull();
-		expect(graphQLRequests).toBe(Math.ceil(zoneCount / 10));
+		expect(graphQLRequests).toBe(Math.ceil(scenario.scale.zones / 10));
 
 		await evictDurableObject(stub);
 		const snapshot = await stub.exportPackedColoMetrics();
+		const expectedRecords =
+			scenario.scale.zones *
+			scenario.scale.colosPerZone *
+			scenario.scale.hostsPerColo;
 		expect(
 			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
-		).toBe(zoneCount * rowsPerZone);
+		).toBe(expectedRecords);
 		for (const zone of snapshot?.zones ?? []) {
-			expect(zone.visits.every((value) => value === sampleValue)).toBe(true);
 			expect(
-				zone.edgeResponseBytes.every((value) => value === sampleValue),
+				zone.visits.every(
+					(value) => value === scenario.scale.trafficPerHost.visits,
+				),
 			).toBe(true);
-			expect(zone.requests.every((value) => value === sampleValue)).toBe(true);
+			expect(
+				zone.edgeResponseBytes.every(
+					(value) => value === scenario.scale.trafficPerHost.responseBytes,
+				),
+			).toBe(true);
+			expect(
+				zone.requests.every(
+					(value) => value === scenario.scale.trafficPerHost.requests,
+				),
+			).toBe(true);
 		}
 	});
 });
