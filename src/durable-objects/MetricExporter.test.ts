@@ -309,7 +309,7 @@ async function createColoHarness(zoneCount = 1) {
 			});
 		},
 		async requests() {
-			const packed = await exporter.exportPackedColoMetrics();
+			const packed = await exporter.exportPackedMetrics();
 			return packed?.zones[0]?.requests;
 		},
 	};
@@ -336,11 +336,11 @@ describe("MetricExporter packed colo storage", () => {
 		h.setObservations([]);
 		await h.refresh(2);
 		await h.refresh(2);
-		expect(
-			(await h.exporter.exportPackedColoMetrics())?.zones[0]?.misses,
-		).toEqual([4]);
+		expect((await h.exporter.exportPackedMetrics())?.zones[0]?.misses).toEqual([
+			4,
+		]);
 		for (let minute = 3; minute <= 6; minute++) await h.refresh(minute);
-		expect((await h.exporter.exportPackedColoMetrics())?.zones).toEqual([]);
+		expect((await h.exporter.exportPackedMetrics())?.zones).toEqual([]);
 	});
 
 	it("round-trips 150,000 packed rows (450,000 samples) within the storage guard", async () => {
@@ -357,7 +357,7 @@ describe("MetricExporter packed colo storage", () => {
 		await h.refresh(1);
 		await h.restart();
 		expect(h.storage.values.get("state")).toMatchObject({ lastError: null });
-		const snapshot = await h.exporter.exportPackedColoMetrics();
+		const snapshot = await h.exporter.exportPackedMetrics();
 		expect(
 			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
 		).toBe(150_000);
@@ -375,7 +375,7 @@ describe("MetricExporter packed colo storage", () => {
 		expect(await h.requests()).toEqual([10]);
 		h.setPacked(false);
 		await h.refresh(2);
-		expect(await h.exporter.exportPackedColoMetrics()).toBeUndefined();
+		expect(await h.exporter.exportPackedMetrics()).toBeUndefined();
 		expect(
 			[...h.storage.values.keys()].filter((key) =>
 				key.startsWith("packed-colo-metrics"),

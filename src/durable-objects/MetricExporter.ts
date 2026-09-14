@@ -23,11 +23,14 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
-	accumulatePackedColoRows,
-	COLO_METRICS_QUERY_NAME,
-	type PackedColoMetricState,
-	PackedColoMetricStateSchema,
-} from "../lib/packed-colo-state";
+	accumulatePackedMetricState,
+	isPackedMetricQuery,
+	PACKED_METRIC_STATE_KEY,
+	type PackedMetricQuery,
+	type PackedMetricState,
+	PackedMetricStateSchema,
+	packedMetricStorageEnabled,
+} from "../lib/packed-metric-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -40,7 +43,6 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
-const STATE_PACKED_COLO_METRICS_KEY = "packed-colo-metrics";
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -409,15 +411,16 @@ export class MetricExporter extends DurableObject<Env> {
 
 			const ingestId = new Date(timeRange.maxtime).getTime();
 			if (
-				config.coloMetricsPackedStorage &&
 				state.scopeType === "account" &&
-				state.queryName === COLO_METRICS_QUERY_NAME
+				isPackedMetricQuery(state.queryName) &&
+				packedMetricStorageEnabled(state.queryName, config)
 			) {
 				const currentState = this.getState();
-				// Packed colo counters live outside the generic MetricDefinition[] state.
-				await this.savePackedColoMetricState(
+				// Packed counters live outside the generic MetricDefinition[] state.
+				await this.savePackedMetricState(
 					result.metrics,
 					currentState,
+					state.queryName,
 					ingestId,
 					result.failedScopes,
 				);
@@ -443,13 +446,13 @@ export class MetricExporter extends DurableObject<Env> {
 
 			if (
 				state.scopeType === "account" &&
-				state.queryName === COLO_METRICS_QUERY_NAME
+				isPackedMetricQuery(state.queryName)
 			) {
 				// Packed storage is off: drop any packed snapshot so re-enabling the
 				// flag starts a fresh counter generation instead of reviving old totals.
 				await deleteChunkedValue(
 					chunkedDurableObjectStorage(this.ctx.storage),
-					STATE_PACKED_COLO_METRICS_KEY,
+					PACKED_METRIC_STATE_KEY,
 				);
 			}
 			const processed = accumulateCounterMetrics(
@@ -777,40 +780,36 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 	}
 
-	private async loadPackedColoMetricState(): Promise<
-		PackedColoMetricState | undefined
+	private async loadPackedMetricState(): Promise<
+		PackedMetricState | undefined
 	> {
 		return loadChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			STATE_PACKED_COLO_METRICS_KEY,
-			PackedColoMetricStateSchema,
+			PACKED_METRIC_STATE_KEY,
+			PackedMetricStateSchema,
 		);
 	}
 
-	private async savePackedColoMetricState(
+	private async savePackedMetricState(
 		metrics: MetricDefinition[],
 		state: MetricExporterState,
+		queryName: PackedMetricQuery,
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
-		const previous = await this.loadPackedColoMetricState();
+		const previous = await this.loadPackedMetricState();
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			STATE_PACKED_COLO_METRICS_KEY,
-			{
-				format: "colo-packed-by-zone-v2",
+			PACKED_METRIC_STATE_KEY,
+			accumulatePackedMetricState({
+				queryName,
 				accountId: state.accountId,
 				accountName: state.accountName,
-				queryName: COLO_METRICS_QUERY_NAME,
-				lastFetch: Date.now(),
-				lastIngest: ingestId,
-				zones: accumulatePackedColoRows(
-					previous,
-					metrics,
-					ingestId,
-					failedScopes,
-				),
-			} satisfies PackedColoMetricState,
+				previous,
+				metrics,
+				ingestId,
+				failedScopes,
+			}),
 		);
 	}
 
@@ -832,15 +831,15 @@ export class MetricExporter extends DurableObject<Env> {
 		return this.getState().metrics;
 	}
 
-	/** Packed colo counters, or undefined until the first packed refresh has run. */
-	async exportPackedColoMetrics(): Promise<PackedColoMetricState | undefined> {
+	/** Packed counters, or undefined until the first packed refresh has run. */
+	async exportPackedMetrics(): Promise<PackedMetricState | undefined> {
 		const state = this.getState();
 		if (
 			state.scopeType !== "account" ||
-			state.queryName !== COLO_METRICS_QUERY_NAME
+			!isPackedMetricQuery(state.queryName)
 		) {
 			return undefined;
 		}
-		return this.loadPackedColoMetricState();
+		return this.loadPackedMetricState();
 	}
 }

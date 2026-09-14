@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MetricDefinition } from "../lib/metrics";
-import type {
-	PackedColoMetricState,
-	PackedColoZone,
-} from "../lib/packed-colo-state";
+import type { PackedColoZone } from "../lib/packed-colo-state";
+import type { PackedMetricState } from "../lib/packed-metric-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { MetricCoordinator } from "./MetricCoordinator";
 
@@ -11,7 +9,7 @@ const requestsName = "cloudflare_zone_colocation_requests_total";
 
 type Row = { host: string; value: number; misses?: number };
 
-function packedState(rows: Row[]): PackedColoMetricState {
+function packedState(rows: Row[]): PackedMetricState {
 	const zone: PackedColoZone = {
 		zone: "example.com",
 		colo: rows.map(() => "SJC"),
@@ -33,7 +31,7 @@ function packedState(rows: Row[]): PackedColoMetricState {
 	};
 }
 
-function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
+function expectedMetrics(state: PackedMetricState): MetricDefinition[] {
 	return (
 		[
 			["cloudflare_zone_colocation_visits_total", "Visits per colo", "visits"],
@@ -58,7 +56,7 @@ function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
 }
 
 async function createCoordinator(
-	packed: PackedColoMetricState[],
+	packedStates: PackedMetricState[],
 	legacy: MetricDefinition[] = [],
 	overrides: {
 		excludeHost?: boolean;
@@ -93,25 +91,24 @@ async function createCoordinator(
 			getByName: (id: string) => ({
 				initialize: async () => {},
 				// Mirrors AccountMetricCoordinator: the caller's mode decides which
-				// representation colo metrics use for this scrape.
+				// representation packed metrics use for this scrape.
 				exportForPrometheus: async (options: {
-					packedColoStorage: boolean;
-				}) => ({
-					metrics:
-						id === "account:account-a" || options.packedColoStorage
-							? []
-							: legacy,
-					packedColoMetrics:
-						id === "account:account-a" && options.packedColoStorage
-							? packed
-							: [],
-					zoneCounts: {
-						total: 1,
-						filtered: 1,
-						processed: 1,
-						skippedFreeTier: 0,
-					},
-				}),
+					packedMetricQueries: readonly "colo-metrics"[];
+				}) => {
+					const packedStorage =
+						options.packedMetricQueries.includes("colo-metrics");
+					return {
+						metrics: id === "account:account-a" || packedStorage ? [] : legacy,
+						packedMetricStates:
+							id === "account:account-a" && packedStorage ? packedStates : [],
+						zoneCounts: {
+							total: 1,
+							filtered: 1,
+							processed: 1,
+							skippedFreeTier: 0,
+						},
+					};
+				},
 			}),
 		},
 	};

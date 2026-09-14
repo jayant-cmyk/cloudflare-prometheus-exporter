@@ -4,8 +4,12 @@ import { extractErrorInfo } from "../lib/errors";
 import { filterAccountsByIds, parseCommaSeparated } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import { serializePackedColoMetrics } from "../lib/packed-colo-prometheus";
-import type { PackedColoMetricState } from "../lib/packed-colo-state";
+import { serializePackedMetrics } from "../lib/packed-metric-prometheus";
+import {
+	PACKED_METRIC_QUERIES,
+	type PackedMetricState,
+	packedMetricStorageEnabled,
+} from "../lib/packed-metric-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import type { Account } from "../lib/types";
@@ -205,6 +209,9 @@ export class MetricCoordinator extends DurableObject<Env> {
 	): AsyncGenerator<string, void> {
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
 		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
+		const packedMetricQueries = PACKED_METRIC_QUERIES.filter((query) =>
+			packedMetricStorageEnabled(query, config),
+		);
 
 		const errorsByAccount: Map<string, { code: string; count: number }[]> =
 			new Map();
@@ -215,7 +222,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 			skippedFreeTier: 0,
 		};
 		const allMetrics: MetricDefinition[] = [];
-		const packedColoMetrics: PackedColoMetricState[] = [];
+		const packedMetricStates: PackedMetricState[] = [];
 
 		for (const account of accounts) {
 			try {
@@ -225,12 +232,12 @@ export class MetricCoordinator extends DurableObject<Env> {
 					this.env,
 				);
 				// Resolve the storage mode once per scrape so every account serializes
-				// colo metrics the same way; mixed modes would duplicate HELP/TYPE lines.
+				// packed metrics the same way; mixed modes would duplicate HELP/TYPE lines.
 				const result = await coordinator.exportForPrometheus({
-					packedColoStorage: config.coloMetricsPackedStorage,
+					packedMetricQueries,
 				});
 				allMetrics.push(...result.metrics);
-				packedColoMetrics.push(...result.packedColoMetrics);
+				packedMetricStates.push(...result.packedMetricStates);
 				zoneCounts.total += result.zoneCounts.total;
 				zoneCounts.filtered += result.zoneCounts.filtered;
 				zoneCounts.processed += result.zoneCounts.processed;
@@ -255,7 +262,7 @@ export class MetricCoordinator extends DurableObject<Env> {
 			}
 		}
 
-		yield* serializePackedColoMetrics(packedColoMetrics, {
+		yield* serializePackedMetrics(packedMetricStates, {
 			denylist: metricsDenylist,
 			excludeLabels,
 		});

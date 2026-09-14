@@ -12,7 +12,12 @@ import {
 } from "../lib/filters";
 import { createLogger, type Logger } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
-import type { PackedColoMetricState } from "../lib/packed-colo-state";
+import {
+	isPackedMetricQuery,
+	type PackedMetricQuery,
+	type PackedMetricState,
+	packedMetricScopes,
+} from "../lib/packed-metric-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import type { Zone } from "../lib/types";
@@ -325,13 +330,15 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 	}
 
 	/**
-	 * Returns normal MetricDefinition[] data plus packed colo data separately.
-	 * The caller decides the colo storage mode for the whole scrape; with packed
-	 * storage, colo-metrics are read only from packed state.
+	 * Returns normal MetricDefinition[] data plus packed data separately.
+	 * The caller decides the packed storage mode for the whole scrape so every
+	 * account uses the same representation.
 	 */
-	async exportForPrometheus(options: { packedColoStorage: boolean }): Promise<{
+	async exportForPrometheus(options: {
+		packedMetricQueries: readonly PackedMetricQuery[];
+	}): Promise<{
 		metrics: MetricDefinition[];
-		packedColoMetrics: PackedColoMetricState[];
+		packedMetricStates: PackedMetricState[];
 		zoneCounts: {
 			total: number;
 			filtered: number;
@@ -362,29 +369,35 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 		const isFreeTierAccount = cfFreeTierSet.has(state.accountId);
 
 		const accountQueries = getActiveAccountQueries(config, isFreeTierAccount);
-		const usePackedColoMetrics =
-			options.packedColoStorage && accountQueries.includes("colo-metrics");
-		let packedColoMetrics: PackedColoMetricState[] = [];
-		if (usePackedColoMetrics) {
-			try {
-				const exporter = await MetricExporter.get(
-					`account:${state.accountId}:colo-metrics`,
-					this.env,
-				);
-				const packedColoMetricState = await exporter.exportPackedColoMetrics();
-				packedColoMetrics =
-					packedColoMetricState === undefined ? [] : [packedColoMetricState];
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				logger.error("Failed to export account metrics", {
-					query: "colo-metrics",
-					error: msg,
-				});
-			}
-		}
-		const accountMetricQueries = usePackedColoMetrics
-			? accountQueries.filter((query) => query !== "colo-metrics")
-			: accountQueries;
+		const enabledPackedMetricQueries = new Set(options.packedMetricQueries);
+		const packedMetricQueries = accountQueries.filter(
+			(query): query is PackedMetricQuery =>
+				isPackedMetricQuery(query) && enabledPackedMetricQueries.has(query),
+		);
+		const packedMetricStates = (
+			await Promise.all(
+				packedMetricQueries.map(async (query) => {
+					try {
+						const exporter = await MetricExporter.get(
+							`account:${state.accountId}:${query}`,
+							this.env,
+						);
+						return await exporter.exportPackedMetrics();
+					} catch (error) {
+						const msg = error instanceof Error ? error.message : String(error);
+						logger.error("Failed to export account metrics", {
+							query,
+							error: msg,
+						});
+						return undefined;
+					}
+				}),
+			)
+		).filter((packedState) => packedState !== undefined);
+		const accountMetricQueries = accountQueries.filter(
+			(query) =>
+				!isPackedMetricQuery(query) || !enabledPackedMetricQueries.has(query),
+		);
 
 		// Collect from account-scoped exporters
 		const accountMetricsResults = await Promise.all(
@@ -445,9 +458,9 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 				}
 			}
 		}
-		for (const state of packedColoMetrics) {
-			for (const zoneBucket of state.zones) {
-				if (zoneBucket.colo.length > 0) zonesWithMetrics.add(zoneBucket.zone);
+		for (const packedState of packedMetricStates) {
+			for (const scope of packedMetricScopes(packedState)) {
+				zonesWithMetrics.add(scope);
 			}
 		}
 		const processedZones = zonesWithMetrics.size;
@@ -457,7 +470,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 
 		return {
 			metrics: allMetrics,
-			packedColoMetrics,
+			packedMetricStates,
 			zoneCounts: {
 				total: state.totalZoneCount,
 				filtered: state.zones.length,

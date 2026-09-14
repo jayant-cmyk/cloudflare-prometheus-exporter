@@ -93,7 +93,7 @@ describe("colo-metrics Durable Object", () => {
 		expect(graphQLRequests).toBe(Math.ceil(scenario.scale.zones / 10));
 
 		await evictDurableObject(stub);
-		const snapshot = await stub.exportPackedColoMetrics();
+		const snapshot = await stub.exportPackedMetrics();
 		const expectedRecords =
 			scenario.scale.zones *
 			scenario.scale.colosPerZone *
