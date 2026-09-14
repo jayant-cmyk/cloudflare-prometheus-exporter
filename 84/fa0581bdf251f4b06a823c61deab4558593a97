@@ -1,0 +1,21 @@
+src/durable-objects/MetricExporter.test.ts
+  s_faa18202457d53::t_e67f1b736834f4 708-858
+test/integration/cache-miss-metrics.test.ts
+  s_faa18202457d53::t_268bc490644229 1-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "84fa0581bdf251f4b06a823c61deab4558593a97",
+  "prompts": {},
+  "sessions": {
+    "s_faa18202457d53": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5f3fdb01ffe9qAbM0EKERoVPX",
+        "model": "gpt-5.4"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
