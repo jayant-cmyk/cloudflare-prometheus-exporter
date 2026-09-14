@@ -60,14 +60,19 @@ describe("packed metric state facade", () => {
 		expect(PACKED_METRIC_QUERIES).toEqual([
 			"colo-metrics",
 			"origin-status-metrics",
+			"request-method-metrics",
 		]);
 		expect(isPackedMetricQuery("colo-metrics")).toBe(true);
 		expect(isPackedMetricQuery("origin-status-metrics")).toBe(true);
+		expect(isPackedMetricQuery("request-method-metrics")).toBe(true);
 		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(false);
 		// Colo keeps its shipped key so deployed DOs keep their accumulated state.
 		expect(packedMetricStateKey("colo-metrics")).toBe("packed-colo-metrics");
 		expect(packedMetricStateKey("origin-status-metrics")).toBe(
 			"packed-origin-status-metrics",
+		);
+		expect(packedMetricStateKey("request-method-metrics")).toBe(
+			"packed-request-method-metrics",
 		);
 	});
 
@@ -165,5 +170,19 @@ describe("packed metric state facade", () => {
 
 		expect(state.zones).toHaveLength(1);
 		expect(state.zones[0]).toMatchObject({ requests: [7] });
+	});
+
+	it("discovers scopes from packed request method rows", () => {
+		expect(
+			packedMetricScopes({
+				format: "request-method-packed-by-zone-v1",
+				accountId: "account-id",
+				accountName: "Account",
+				queryName: "request-method-metrics",
+				lastFetch: 1,
+				lastIngest: 1,
+				zones: [{ zone: "example.com", rows: [{ method: "GET", count: 1 }] }],
+			}),
+		).toEqual(["example.com"]);
 	});
 });

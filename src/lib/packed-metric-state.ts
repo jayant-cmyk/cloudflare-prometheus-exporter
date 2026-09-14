@@ -10,13 +10,25 @@ import {
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
 	PackedOriginStatusMetricStateSchema,
 } from "./packed-origin-status-state";
+import {
+	PackedRequestMethodMetricStateSchema,
+	REQUEST_METHOD_METRICS_QUERY_NAME,
+} from "./packed-request-method-state";
 
 /** Query names currently backed by compact metric snapshots. */
 export const PACKED_METRIC_QUERIES = [
 	COLO_METRICS_QUERY_NAME,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
+	REQUEST_METHOD_METRICS_QUERY_NAME,
 ] as const;
 export type PackedMetricQuery = (typeof PACKED_METRIC_QUERIES)[number];
+
+const METRIC_DEFINITION_PACKED_QUERIES = [
+	COLO_METRICS_QUERY_NAME,
+	ORIGIN_STATUS_METRICS_QUERY_NAME,
+] as const;
+export type MetricDefinitionPackedQuery =
+	(typeof METRIC_DEFINITION_PACKED_QUERIES)[number];
 
 /**
  * Storage keys for compact snapshots, one per query. Colo intentionally keeps
@@ -26,6 +38,7 @@ export type PackedMetricQuery = (typeof PACKED_METRIC_QUERIES)[number];
 const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
 	[COLO_METRICS_QUERY_NAME]: "packed-colo-metrics",
 	[ORIGIN_STATUS_METRICS_QUERY_NAME]: "packed-origin-status-metrics",
+	[REQUEST_METHOD_METRICS_QUERY_NAME]: "packed-request-method-metrics",
 };
 
 /**
@@ -35,6 +48,7 @@ const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
 export const PackedMetricStateSchema = z.discriminatedUnion("queryName", [
 	PackedColoMetricStateSchema,
 	PackedOriginStatusMetricStateSchema,
+	PackedRequestMethodMetricStateSchema,
 ]);
 export type PackedMetricState = z.infer<typeof PackedMetricStateSchema>;
 
@@ -65,13 +79,20 @@ export function packedMetricStorageEnabled(
  * row count regardless of which query produced the snapshot.
  */
 export function packedMetricScopes(state: PackedMetricState): string[] {
-	return state.zones
-		.filter((zone) => zone.misses.length > 0)
-		.map((zone) => zone.zone);
+	switch (state.queryName) {
+		case REQUEST_METHOD_METRICS_QUERY_NAME:
+			return state.zones
+				.filter((zone) => zone.rows.length > 0)
+				.map((zone) => zone.zone);
+		default:
+			return state.zones
+				.filter((zone) => zone.misses.length > 0)
+				.map((zone) => zone.zone);
+	}
 }
 
 export type AccumulatePackedMetricStateInput = {
-	queryName: PackedMetricQuery;
+	queryName: MetricDefinitionPackedQuery;
 	accountId: string;
 	accountName: string;
 	previous: PackedMetricState | undefined;
@@ -84,7 +105,7 @@ export type AccumulatePackedMetricStateInput = {
  * Narrows a stored snapshot to the codec that produced it, so a snapshot left
  * over from another query is treated as absent instead of mis-parsed.
  */
-function previousFor<Q extends PackedMetricQuery>(
+function previousFor<Q extends MetricDefinitionPackedQuery>(
 	previous: PackedMetricState | undefined,
 	queryName: Q,
 ): Extract<PackedMetricState, { queryName: Q }> | undefined {
@@ -130,4 +151,12 @@ export function accumulatePackedMetricState(
 				),
 			};
 	}
+}
+
+export function isMetricDefinitionPackedQuery(
+	query: PackedMetricQuery,
+): query is MetricDefinitionPackedQuery {
+	return (METRIC_DEFINITION_PACKED_QUERIES as readonly string[]).includes(
+		query,
+	);
 }

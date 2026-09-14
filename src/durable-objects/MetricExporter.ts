@@ -13,7 +13,11 @@ import {
 	loadChunkedValue,
 	saveChunkedValue,
 } from "../lib/chunked-storage";
-import { accumulateCounterMetrics } from "../lib/counters";
+import {
+	accumulateCounterMetrics,
+	accumulateCounterObservations,
+	type CounterObservation,
+} from "../lib/counters";
 import { parseCommaSeparated, partitionZonesByTier } from "../lib/filters";
 import { configFromEnv, createLogger, type Logger } from "../lib/logger";
 import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
@@ -24,16 +28,26 @@ import {
 } from "../lib/metrics";
 import {
 	accumulatePackedMetricState,
+	isMetricDefinitionPackedQuery,
 	isPackedMetricQuery,
+	type MetricDefinitionPackedQuery,
 	type PackedMetricQuery,
 	type PackedMetricState,
 	PackedMetricStateSchema,
 	packedMetricStateKey,
 	packedMetricStorageEnabled,
 } from "../lib/packed-metric-state";
+import {
+	buildPackedRequestMethodZones,
+	type PackedRequestMethodMetricState,
+	REQUEST_METHOD_METRIC_NAME,
+	REQUEST_METHOD_METRICS_QUERY_NAME,
+	type RequestMethodZone,
+} from "../lib/packed-request-method-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
+	type CounterState,
 	CounterStateSchema,
 	MetricExporterIdSchema,
 	type MetricExporterIdString,
@@ -84,6 +98,8 @@ type MetricExporterState = z.infer<typeof MetricExporterStateSchema>;
 
 type MetricFetchResult = {
 	metrics: MetricDefinition[];
+	packedMetricState?: PackedMetricState;
+	packedCounters?: Record<string, CounterState>;
 	partialErrors: unknown[];
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
@@ -356,7 +372,7 @@ export class MetricExporter extends DurableObject<Env> {
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<void> {
-		const state = this.getState();
+		let state = this.getState();
 
 		// Skip if zone context not yet pushed (account-scoped needs zones)
 		if (state.scopeType === "account" && state.zones.length === 0) {
@@ -391,12 +407,14 @@ export class MetricExporter extends DurableObject<Env> {
 
 		try {
 			let result: MetricFetchResult;
+			const ingestId = new Date(timeRange.maxtime).getTime();
 
 			if (state.scopeType === "account") {
 				result = await this.fetchAccountScopedMetrics(
 					client,
 					state,
 					timeRange,
+					ingestId,
 					config,
 					logger,
 				);
@@ -409,14 +427,37 @@ export class MetricExporter extends DurableObject<Env> {
 				};
 			}
 
-			const ingestId = new Date(timeRange.maxtime).getTime();
 			if (
 				state.scopeType === "account" &&
 				isPackedMetricQuery(state.queryName) &&
 				packedMetricStorageEnabled(state.queryName, config)
 			) {
 				const currentState = this.getState();
+				if (result.packedMetricState !== undefined) {
+					await this.savePackedMetricSnapshot(result.packedMetricState);
+					const refreshedState: MetricExporterState = {
+						...currentState,
+						metrics: [],
+						counters: result.packedCounters ?? {},
+						lastIngest: ingestId,
+						lastRefresh: Date.now(),
+						lastError: null,
+						zoneRetryAfter: result.zoneRetryAfter,
+					};
+					await this.saveState(refreshedState);
+					this.state = refreshedState;
+
+					logger.info("Refresh complete", {
+						metric_count: result.packedMetricState.zones.length,
+						partial_failure_count: result.partialErrors.length,
+					});
+					await this.scheduleNextAlarm(config, nextRefreshDelaySeconds);
+					return;
+				}
 				// Packed counters live outside the generic MetricDefinition[] state.
+				if (!isMetricDefinitionPackedQuery(state.queryName)) {
+					throw new Error(`Packed snapshot missing for ${state.queryName}`);
+				}
 				await this.savePackedMetricState(
 					result.metrics,
 					currentState,
@@ -450,10 +491,23 @@ export class MetricExporter extends DurableObject<Env> {
 			) {
 				// Packed storage is off: drop any packed snapshot so re-enabling the
 				// flag starts a fresh counter generation instead of reviving old totals.
+				const packedSnapshot = await this.loadPackedMetricState(
+					state.queryName,
+				);
 				await deleteChunkedValue(
 					chunkedDurableObjectStorage(this.ctx.storage),
 					packedMetricStateKey(state.queryName),
 				);
+				if (
+					state.queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
+					packedSnapshot !== undefined
+				) {
+					state = {
+						...state,
+						counters: {},
+						lastIngest: 0,
+					};
+				}
 			}
 			const processed = accumulateCounterMetrics(
 				result.metrics,
@@ -540,6 +594,7 @@ export class MetricExporter extends DurableObject<Env> {
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		timeRange: TimeRange,
+		ingestId: number,
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<MetricFetchResult> {
@@ -636,9 +691,32 @@ export class MetricExporter extends DurableObject<Env> {
 			// Cloudflare GraphQL API limits queries to 10 zones (zonesHardLimit).
 			// Chunk zones and merge results to support accounts with >10 zones.
 			const ZONES_PER_CHUNK = 10;
+			const packedRequestMethod =
+				queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
+				packedMetricStorageEnabled(queryName, config);
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
+				if (packedRequestMethod) {
+					const packed = await this.buildPackedRequestMethodState(
+						state,
+						await client.getPackedRequestMethodZones(
+							zoneIds,
+							zonesToQuery,
+							timeRange,
+						),
+						ingestId,
+						new Set(),
+					);
+					return {
+						metrics: [],
+						packedMetricState: packed.state,
+						packedCounters: packed.counters,
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
 				return {
 					metrics: await client.getZoneMetrics(
 						queryName,
@@ -682,22 +760,34 @@ export class MetricExporter extends DurableObject<Env> {
 			let firstChunkError: unknown;
 			let longestRetryError: unknown;
 			let longestRetrySeconds = config.metricRefreshIntervalSeconds;
+			const requestMethodRows: RequestMethodZone[] = [];
 			for (let i = 0; i < queryableZones.length; i += ZONES_PER_CHUNK) {
 				const chunkZones = queryableZones.slice(i, i + ZONES_PER_CHUNK);
 				const chunkIds = chunkZones.map((z) => z.id);
 
 				try {
-					const metrics = await client.getZoneMetrics(
-						queryName,
-						chunkIds,
-						chunkZones,
-						firewallRules,
-						timeRange,
-						hostMetricsAllowlist,
-						hostMetricsDelaySeconds,
-						config.httpStatusGroup,
-						config.packedMetricStorage,
-					);
+					const metrics = packedRequestMethod
+						? []
+						: await client.getZoneMetrics(
+								queryName,
+								chunkIds,
+								chunkZones,
+								firewallRules,
+								timeRange,
+								hostMetricsAllowlist,
+								hostMetricsDelaySeconds,
+								config.httpStatusGroup,
+								config.packedMetricStorage,
+							);
+					if (packedRequestMethod) {
+						requestMethodRows.push(
+							...(await client.getPackedRequestMethodZones(
+								chunkIds,
+								chunkZones,
+								timeRange,
+							)),
+						);
+					}
 					for (const zoneId of chunkIds) delete zoneRetryAfter[zoneId];
 					chunkResults.push(metrics);
 				} catch (error) {
@@ -732,6 +822,22 @@ export class MetricExporter extends DurableObject<Env> {
 
 			if (chunkResults.length === 0 && firstChunkError !== undefined) {
 				throw longestRetryError ?? firstChunkError;
+			}
+			if (packedRequestMethod) {
+				const packed = await this.buildPackedRequestMethodState(
+					state,
+					requestMethodRows,
+					ingestId,
+					failedScopes,
+				);
+				return {
+					metrics: [],
+					packedMetricState: packed.state,
+					packedCounters: packed.counters,
+					partialErrors,
+					failedScopes,
+					zoneRetryAfter,
+				};
 			}
 			return {
 				metrics: mergeMetricDefinitions(...chunkResults),
@@ -793,7 +899,7 @@ export class MetricExporter extends DurableObject<Env> {
 	private async savePackedMetricState(
 		metrics: MetricDefinition[],
 		state: MetricExporterState,
-		queryName: PackedMetricQuery,
+		queryName: MetricDefinitionPackedQuery,
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
@@ -811,6 +917,63 @@ export class MetricExporter extends DurableObject<Env> {
 				failedScopes,
 			}),
 		);
+	}
+
+	private async savePackedMetricSnapshot(
+		state: PackedMetricState,
+	): Promise<void> {
+		await saveChunkedValue(
+			chunkedDurableObjectStorage(this.ctx.storage),
+			packedMetricStateKey(state.queryName),
+			state,
+		);
+	}
+
+	private async buildPackedRequestMethodState(
+		state: MetricExporterState,
+		zones: readonly RequestMethodZone[],
+		ingestId: number,
+		failedScopes: ReadonlySet<string>,
+	): Promise<{
+		state: PackedRequestMethodMetricState;
+		counters: Record<string, CounterState>;
+	}> {
+		const previousPacked = await this.loadPackedMetricState(
+			REQUEST_METHOD_METRICS_QUERY_NAME,
+		);
+		const observations: CounterObservation[] = zones.flatMap((zone) =>
+			zone.rows.map((row) => ({
+				metricName: REQUEST_METHOD_METRIC_NAME,
+				labels: {
+					zone: zone.zone,
+					method: row.method,
+				},
+				value: row.count,
+			})),
+		);
+		const accumulated = accumulateCounterObservations(
+			observations,
+			previousPacked?.queryName === REQUEST_METHOD_METRICS_QUERY_NAME
+				? state.counters
+				: {},
+			{
+				ingestId,
+				ageMissingCounters: state.lastIngest !== ingestId,
+				failedScopes,
+			},
+		);
+		return {
+			state: {
+				format: "request-method-packed-by-zone-v1",
+				accountId: state.accountId,
+				accountName: state.accountName,
+				queryName: REQUEST_METHOD_METRICS_QUERY_NAME,
+				lastFetch: Date.now(),
+				lastIngest: ingestId,
+				zones: buildPackedRequestMethodZones(accumulated.observations),
+			},
+			counters: accumulated.counters,
+		};
 	}
 
 	/** Persist state in bounded storage chunks before publishing it in memory. */

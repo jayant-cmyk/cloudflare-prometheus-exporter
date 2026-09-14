@@ -11,6 +11,11 @@ import {
 	type LoggerConfig,
 } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
+import {
+	REQUEST_METHOD_METRIC_HELP,
+	REQUEST_METHOD_METRIC_NAME,
+	type RequestMethodZone,
+} from "../lib/packed-request-method-state";
 import { getEnvDefaults } from "../lib/runtime-config";
 import type {
 	Account,
@@ -550,6 +555,37 @@ export class CloudflareMetricsClient {
 				throw new Error(`Unknown account metric query: ${_exhaustive}`);
 			}
 		}
+	}
+
+	async getPackedRequestMethodZones(
+		zoneIds: string[],
+		zones: Zone[],
+		timeRange: TimeRange,
+	): Promise<RequestMethodZone[]> {
+		const result = await this.gql.query(RequestMethodMetricsQuery, {
+			zoneIDs: zoneIds,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("request-method-metrics", result.error);
+		}
+
+		const buckets: RequestMethodZone[] = [];
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			buckets.push({
+				zone: findZoneName(zoneData.zoneTag, zones),
+				rows: (zoneData.httpRequestsAdaptiveGroups ?? [])
+					.filter((group) => group.count != null && group.count > 0)
+					.map((group) => ({
+						method: group.dimensions?.clientRequestHTTPMethodName ?? "",
+						count: group.count ?? 0,
+					})),
+			});
+		}
+		return buckets;
 	}
 
 	/**
@@ -2374,37 +2410,26 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(RequestMethodMetricsQuery, {
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
-
-		if (result.error) {
-			throw graphQLQueryError("request-method-metrics", result.error);
-		}
-
 		const methodCount: MetricDefinition = {
-			name: "cloudflare_zone_requests_by_method_total",
-			help: "Requests by HTTP method",
+			name: REQUEST_METHOD_METRIC_NAME,
+			help: REQUEST_METHOD_METRIC_HELP,
 			type: "counter",
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
-
-			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
-				if (group.count != null && group.count > 0) {
-					methodCount.values.push({
-						labels: {
-							zone: zoneName,
-							method: group.dimensions?.clientRequestHTTPMethodName ?? "",
-						},
-						value: group.count,
-					});
-				}
+		for (const zone of await this.getPackedRequestMethodZones(
+			zoneIds,
+			zones,
+			timeRange,
+		)) {
+			for (const row of zone.rows) {
+				methodCount.values.push({
+					labels: {
+						zone: zone.zone,
+						method: row.method,
+					},
+					value: row.count,
+				});
 			}
 		}
 

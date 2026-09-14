@@ -2,8 +2,19 @@ import type { MetricDefinition, MetricValue } from "./metrics";
 import { metricKey } from "./time";
 import type { CounterState } from "./types";
 
+export type CounterObservation = {
+	metricName: string;
+	labels: Record<string, string>;
+	value: number;
+};
+
 export type CounterProcessingResult = {
 	metrics: MetricDefinition[];
+	counters: Record<string, CounterState>;
+};
+
+export type CounterObservationProcessingResult = {
+	observations: CounterObservation[];
 	counters: Record<string, CounterState>;
 };
 
@@ -104,4 +115,87 @@ export function accumulateCounterMetrics(
 	}
 
 	return { metrics, counters };
+}
+
+/**
+ * Accumulates flat counter observations without rebuilding MetricDefinition[].
+ * Observations sharing the same metric name and labels are summed first.
+ */
+export function accumulateCounterObservations(
+	rawObservations: readonly CounterObservation[],
+	existingCounters: Record<string, CounterState>,
+	options: CounterProcessingOptions = {},
+): CounterObservationProcessingResult {
+	const counters: Record<string, CounterState> = {};
+	const observations = new Map<string, CounterObservation>();
+	const order: string[] = [];
+
+	for (const observation of rawObservations) {
+		const key = metricKey(observation.metricName, observation.labels);
+		const existing = observations.get(key);
+		if (existing === undefined) {
+			observations.set(key, { ...observation });
+			order.push(key);
+		} else {
+			existing.value += observation.value;
+		}
+	}
+
+	const accumulatedObservations: CounterObservation[] = [];
+	for (const key of order) {
+		const observation = observations.get(key);
+		if (observation === undefined) continue;
+		const existing = existingCounters[key];
+		const alreadyIngested =
+			options.ingestId !== undefined &&
+			existing?.lastIngest === options.ingestId;
+		const accumulated =
+			(existing?.accumulated ?? 0) + (alreadyIngested ? 0 : observation.value);
+		counters[key] = {
+			accumulated,
+			missesRemaining: DEFAULT_STALE_COUNTER_MISSES,
+			...(options.ingestId === undefined
+				? {}
+				: { lastIngest: options.ingestId }),
+			...(observation.labels.zone === undefined
+				? {}
+				: { scope: observation.labels.zone }),
+		};
+		accumulatedObservations.push({
+			...observation,
+			value: accumulated,
+		});
+	}
+
+	for (const [key, state] of Object.entries(existingCounters)) {
+		if (Object.hasOwn(counters, key)) {
+			continue;
+		}
+
+		const scope = state.scope ?? zoneScopeFromMetricKey(key);
+		if (
+			options.ageMissingCounters === false ||
+			(options.failedScopes !== undefined &&
+				options.failedScopes.size > 0 &&
+				(scope === undefined || options.failedScopes.has(scope)))
+		) {
+			counters[key] = scope === undefined ? state : { ...state, scope };
+			continue;
+		}
+
+		const missesRemaining =
+			state.missesRemaining ?? DEFAULT_STALE_COUNTER_MISSES;
+		if (missesRemaining > 1) {
+			counters[key] = {
+				...state,
+				...(scope === undefined ? {} : { scope }),
+				missesRemaining: missesRemaining - 1,
+			};
+		}
+	}
+
+	return {
+		observations: accumulatedObservations,
+		counters,
+	};
 }

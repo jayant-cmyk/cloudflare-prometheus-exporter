@@ -9,6 +9,11 @@ import {
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
 	type PackedOriginStatusMetricState,
 } from "./packed-origin-status-state";
+import { serializePackedRequestMethodMetrics } from "./packed-request-method-prometheus";
+import {
+	type PackedRequestMethodMetricState,
+	REQUEST_METHOD_METRICS_QUERY_NAME,
+} from "./packed-request-method-state";
 import type { SerializeOptions } from "./prometheus";
 
 /**
@@ -22,6 +27,7 @@ export function* serializePackedMetrics(
 ): Generator<string> {
 	const coloStates: PackedColoMetricState[] = [];
 	const originStatusStates: PackedOriginStatusMetricState[] = [];
+	const requestMethodStates: PackedRequestMethodMetricState[] = [];
 	for (const state of states) {
 		switch (state.queryName) {
 			case COLO_METRICS_QUERY_NAME:
@@ -30,9 +36,13 @@ export function* serializePackedMetrics(
 			case ORIGIN_STATUS_METRICS_QUERY_NAME:
 				originStatusStates.push(state);
 				break;
+			case REQUEST_METHOD_METRICS_QUERY_NAME:
+				requestMethodStates.push(state);
+				break;
 		}
 	}
 
 	yield* serializePackedColoMetrics(coloStates, options);
 	yield* serializePackedOriginStatusMetrics(originStatusStates, options);
+	yield* serializePackedRequestMethodMetrics(requestMethodStates, options);
 }
