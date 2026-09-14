@@ -1,0 +1,27 @@
+src/cloudflare/client.ts
+  s_faa18202457d53::t_1f26b49cb6e99c 14-18,560-590,2414-2415,2420-2432
+src/lib/counters.ts
+  s_faa18202457d53::t_afaf941a086457 5-10,16-20,119-201
+src/lib/packed-metric-state.ts
+  s_faa18202457d53::t_17f529db3f80b4 13-16,22,26-32,41,51,82-91,95,108,155-162
+src/lib/packed-request-method-state.ts
+  s_faa18202457d53::t_1da3a035323a27 1-88
+test/integration/request-method-metrics.test.ts
+  s_faa18202457d53::t_a98cafc279faa9 1-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "eceb0b882a53fa1c82f1b249646da2b3176d72c7",
+  "prompts": {},
+  "sessions": {
+    "s_faa18202457d53": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5f3fdb01ffe9qAbM0EKERoVPX",
+        "model": "gpt-5.4"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
