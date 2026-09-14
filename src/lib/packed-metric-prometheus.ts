@@ -1,3 +1,8 @@
+import { serializePackedCacheMissMetrics } from "./packed-cache-miss-prometheus";
+import {
+	CACHE_MISS_METRICS_QUERY_NAME,
+	type PackedCacheMissMetricState,
+} from "./packed-cache-miss-state";
 import { serializePackedColoMetrics } from "./packed-colo-prometheus";
 import {
 	COLO_METRICS_QUERY_NAME,
@@ -26,10 +31,14 @@ export function* serializePackedMetrics(
 	options: SerializeOptions,
 ): Generator<string> {
 	const coloStates: PackedColoMetricState[] = [];
+	const cacheMissStates: PackedCacheMissMetricState[] = [];
 	const originStatusStates: PackedOriginStatusMetricState[] = [];
 	const requestMethodStates: PackedRequestMethodMetricState[] = [];
 	for (const state of states) {
 		switch (state.queryName) {
+			case CACHE_MISS_METRICS_QUERY_NAME:
+				cacheMissStates.push(state);
+				break;
 			case COLO_METRICS_QUERY_NAME:
 				coloStates.push(state);
 				break;
@@ -42,6 +51,7 @@ export function* serializePackedMetrics(
 		}
 	}
 
+	yield* serializePackedCacheMissMetrics(cacheMissStates, options);
 	yield* serializePackedColoMetrics(coloStates, options);
 	yield* serializePackedOriginStatusMetrics(originStatusStates, options);
 	yield* serializePackedRequestMethodMetrics(requestMethodStates, options);

@@ -1,4 +1,4 @@
-import type { MetricDefinition } from "./metrics";
+import type { MetricDefinition, MetricType } from "./metrics";
 
 /** Consecutive windows a row may be absent before it is dropped. */
 export const STALE_COUNTER_MISSES = 5;
@@ -27,6 +27,7 @@ export type ColumnarZoneRows = {
 export type ColumnarFamily = {
 	name: string;
 	help: string;
+	type?: MetricType;
 	valueIndex: number;
 };
 

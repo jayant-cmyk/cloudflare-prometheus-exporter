@@ -705,3 +705,154 @@ describe("MetricExporter packed request method storage", () => {
 		]);
 	});
 });
+
+async function createCacheMissHarness() {
+	const storage = new AlarmStorage();
+	const zone = {
+		id: "zone-id",
+		name: "example.com",
+		status: "active",
+		plan: { id: "paid", name: "Paid" },
+		account: { id: "account-id", name: "Account" },
+	};
+	storage.values.set("state", {
+		...storedState(),
+		queryName: "cache-miss-metrics",
+		zones: [zone],
+	});
+	let packed = false;
+	let observations = [
+		{
+			country: "US",
+			host: "a.example.com",
+			count: 3,
+			avgOriginDurationMs: 900,
+		},
+		{
+			country: "DE",
+			host: "b.example.com",
+			count: 0,
+			avgOriginDurationMs: 400,
+		},
+	];
+	vi.stubGlobal(
+		"fetch",
+		async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						viewer: {
+							zones: [
+								{
+									zoneTag: zone.id,
+									httpRequestsAdaptiveGroups: observations.map((row) => ({
+										dimensions: {
+											clientCountryName: row.country,
+											clientRequestHTTPHost: row.host,
+										},
+										count: row.count,
+										avg: {
+											originResponseDurationMs: row.avgOriginDurationMs,
+										},
+									})),
+								},
+							],
+						},
+					},
+				}),
+				{ headers: { "content-type": "application/json" } },
+			),
+	);
+	const env = {
+		CLOUDFLARE_API_TOKEN: "test-token",
+		CONFIG_KV: {
+			get: async () => JSON.stringify({ packedMetricStorage: packed }),
+		},
+		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+	};
+	const { exporter, ready } = createExporter(storage, env);
+	await ready;
+	return {
+		storage,
+		get exporter() {
+			return exporter;
+		},
+		setPacked(enabled: boolean) {
+			packed = enabled;
+		},
+		setObservations(rows: typeof observations) {
+			observations = rows;
+		},
+		async refresh(minute: number) {
+			await exporter.triggerRefresh({
+				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
+				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
+			});
+		},
+		async snapshot() {
+			const state = await exporter.exportPackedMetrics();
+			if (state !== undefined && state.queryName !== "cache-miss-metrics") {
+				throw new Error("expected a packed cache miss snapshot");
+			}
+			return state;
+		},
+	};
+}
+
+describe("MetricExporter packed cache miss storage", () => {
+	it("stores compact rows and keeps generic metrics empty", async () => {
+		const h = await createCacheMissHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+
+		expect((await h.snapshot())?.zones).toEqual([
+			{
+				zone: "example.com",
+				rows: [
+					{
+						country: "US",
+						host: "a.example.com",
+						count: 3,
+						avgOriginDurationMs: 900,
+					},
+					{
+						country: "DE",
+						host: "b.example.com",
+						count: 0,
+						avgOriginDurationMs: 400,
+					},
+				],
+			},
+		]);
+		expect(h.storage.values.get("state")).toMatchObject({
+			metrics: [],
+			counters: {},
+			lastError: null,
+		});
+		expect([...h.storage.values.keys()]).toContain("packed-cache-miss-metrics");
+	});
+
+	it("uses the legacy gauge metric when the flag is disabled", async () => {
+		const h = await createCacheMissHarness();
+		await h.refresh(1);
+
+		expect(await h.snapshot()).toBeUndefined();
+		expect(await h.exporter.export()).toEqual([
+			{
+				name: "cloudflare_zone_cache_miss_origin_duration_seconds",
+				help: "Average origin response duration on cache miss in seconds",
+				type: "gauge",
+				values: [
+					{
+						labels: {
+							zone: "example.com",
+							country: "US",
+							host: "a.example.com",
+						},
+						value: 0.9,
+					},
+				],
+			},
+		]);
+	});
+});

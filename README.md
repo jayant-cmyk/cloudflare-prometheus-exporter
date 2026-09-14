@@ -56,7 +56,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `HEALTH_CHECK_CACHE_TTL_SECONDS` | 10 | Health check cache TTL |
 | `EXCLUDE_HOST` | false | Exclude host labels from metrics |
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
-| `PACKED_METRIC_STORAGE` | false | Enable compact by-zone storage and chunked read output for packed queries (`colo-metrics`, `origin-status-metrics`, `request-method-metrics`). Metric names and labels are unchanged. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
+| `PACKED_METRIC_STORAGE` | false | Enable compact by-zone storage and chunked read output for packed queries (`colo-metrics`, `origin-status-metrics`, `request-method-metrics`, `cache-miss-metrics`). Metric names and labels are unchanged. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
 | `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
@@ -157,7 +157,7 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
-| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for `colo-metrics`, `origin-status-metrics`, and `request-method-metrics` |
+| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for `colo-metrics`, `origin-status-metrics`, `request-method-metrics`, and `cache-miss-metrics` |
 | `coloMetricsPackedStorage` | boolean | Deprecated alias for `packedMetricStorage` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
@@ -204,12 +204,13 @@ Packed queries and their storage keys:
 | `colo-metrics` | `packed-colo-metrics` | visits, edge response bytes, requests per `zone`/`colo`/`host` |
 | `origin-status-metrics` | `packed-origin-status-metrics` | requests per `zone`/`origin_status`/`country`/`host` |
 | `request-method-metrics` | `packed-request-method-metrics` | requests per `zone`/`method` |
+| `cache-miss-metrics` | `packed-cache-miss-metrics` | average origin duration per `zone`/`country`/`host` |
 
 - Toggling the flag in either direction **resets the counters of every packed query** (Prometheus `rate()`/`increase()` handle counter resets). Disabling deletes the packed snapshots on the next refresh, so re-enabling starts from zero rather than reviving old totals. The affected metrics are absent until the first successful refresh in the new mode.
 - The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked output for the same metric family.
 - A row is observed as a unit: all counters of a row share one retry checkpoint, and a counter Cloudflare omits for an observed row is recorded as `0`. Rows not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
 - When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.
-- `origin-status-metrics` and `request-method-metrics` need no GraphQL change: they already group only by the dimensions they export. `colo-metrics` switches to a reduced query that drops the unexported `datetime` and `originResponseStatus` dimensions.
+- `origin-status-metrics`, `request-method-metrics`, and `cache-miss-metrics` need no GraphQL change: they already group only by the dimensions they export. `colo-metrics` switches to a reduced query that drops the unexported `datetime` and `originResponseStatus` dimensions.
 - The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. At ~55 bytes per unique row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
 
 ## Available Metrics

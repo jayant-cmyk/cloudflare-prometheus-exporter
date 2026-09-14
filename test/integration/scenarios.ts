@@ -29,6 +29,23 @@ export type RequestMethodMetricScenario = Readonly<{
 	}>;
 }>;
 
+export type CacheMissMetricScenario = Readonly<{
+	name: string;
+	path: Readonly<{
+		metric: "cache-miss-metrics";
+		operations: readonly ["refresh", "read"];
+	}>;
+	scale: Readonly<{
+		zones: number;
+		countriesPerZone: number;
+		hostsPerCountry: number;
+		trafficPerHost: Readonly<{
+			count: number;
+			avgOriginDurationMs: number;
+		}>;
+	}>;
+}>;
+
 // Add a case here using business traffic dimensions; the test derives records.
 export const COLO_METRIC_SCENARIOS = [
 	{
@@ -93,3 +110,38 @@ export const REQUEST_METHOD_METRIC_SCENARIOS = [
 		},
 	},
 ] satisfies readonly RequestMethodMetricScenario[];
+
+export const CACHE_MISS_METRIC_SCENARIOS = [
+	{
+		name: "small cache miss account",
+		path: {
+			metric: "cache-miss-metrics",
+			operations: ["refresh", "read"],
+		},
+		scale: {
+			zones: 1,
+			countriesPerZone: 10,
+			hostsPerCountry: 10,
+			trafficPerHost: {
+				count: 10,
+				avgOriginDurationMs: 800,
+			},
+		},
+	},
+	{
+		name: "large cache miss account",
+		path: {
+			metric: "cache-miss-metrics",
+			operations: ["refresh", "read"],
+		},
+		scale: {
+			zones: 15,
+			countriesPerZone: 10,
+			hostsPerCountry: 1_000,
+			trafficPerHost: {
+				count: 10,
+				avgOriginDurationMs: 800,
+			},
+		},
+	},
+] satisfies readonly CacheMissMetricScenario[];

@@ -35,13 +35,14 @@ function escapeLabel(value: string): string {
 }
 
 /**
- * Sums samples that collapse onto the same label set once labels are excluded,
- * mirroring how `serializeToPrometheus` aggregates counters.
+ * Aggregates collapsed samples the same way `serializeToPrometheus` does:
+ * counters sum and gauges keep the maximum value.
  */
 function* aggregateSamples(
 	samples: Iterable<ColumnarSample>,
 	keptIndexes: readonly number[],
 	includeZone: boolean,
+	metricType: string,
 ): Generator<ColumnarSample> {
 	const aggregated = new Map<string, ColumnarSample>();
 	for (const sample of samples) {
@@ -52,7 +53,10 @@ function* aggregateSamples(
 		if (existing === undefined) {
 			aggregated.set(signature, { zone, keys, value: sample.value });
 		} else {
-			existing.value += sample.value;
+			existing.value =
+				metricType === "counter"
+					? existing.value + sample.value
+					: Math.max(existing.value, sample.value);
 		}
 	}
 	yield* aggregated.values();
@@ -77,11 +81,12 @@ function* familyLines(
 	includeZone: boolean,
 ): Generator<string> {
 	let wroteHeaders = false;
+	const metricType = family.type ?? "counter";
 	for (const sample of samples) {
 		// Emit headers only once a family has a sample, so a fully aged-out
 		// family produces no bare HELP/TYPE block.
 		if (!wroteHeaders) {
-			yield `# HELP ${family.name} ${family.help}\n# TYPE ${family.name} counter\n`;
+			yield `# HELP ${family.name} ${family.help}\n# TYPE ${family.name} ${metricType}\n`;
 			wroteHeaders = true;
 		}
 		yield `${family.name}${formatLabels(sample, keptLabels, includeZone)} ${formatValue(sample.value)}\n`;
@@ -90,7 +95,7 @@ function* familyLines(
 }
 
 /**
- * Lazily serializes packed columnar counters in bounded output chunks so
+ * Lazily serializes packed columnar metrics in bounded output chunks so
  * streaming respects backpressure from a slow scraper.
  *
  * @param samplesFor Lazy sample source for a value slot.
@@ -120,7 +125,12 @@ export function* serializeColumnarMetrics(
 		const samples = samplesFor(family.valueIndex);
 		for (const line of familyLines(
 			needsAggregation
-				? aggregateSamples(samples, keptIndexes, includeZone)
+				? aggregateSamples(
+						samples,
+						keptIndexes,
+						includeZone,
+						family.type ?? "counter",
+					)
 				: samples,
 			family,
 			keptLabels,

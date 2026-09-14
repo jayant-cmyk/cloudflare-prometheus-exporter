@@ -61,11 +61,12 @@ describe("packed metric state facade", () => {
 			"colo-metrics",
 			"origin-status-metrics",
 			"request-method-metrics",
+			"cache-miss-metrics",
 		]);
 		expect(isPackedMetricQuery("colo-metrics")).toBe(true);
 		expect(isPackedMetricQuery("origin-status-metrics")).toBe(true);
 		expect(isPackedMetricQuery("request-method-metrics")).toBe(true);
-		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(false);
+		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(true);
 		// Colo keeps its shipped key so deployed DOs keep their accumulated state.
 		expect(packedMetricStateKey("colo-metrics")).toBe("packed-colo-metrics");
 		expect(packedMetricStateKey("origin-status-metrics")).toBe(
@@ -73,6 +74,9 @@ describe("packed metric state facade", () => {
 		);
 		expect(packedMetricStateKey("request-method-metrics")).toBe(
 			"packed-request-method-metrics",
+		);
+		expect(packedMetricStateKey("cache-miss-metrics")).toBe(
+			"packed-cache-miss-metrics",
 		);
 	});
 
@@ -182,6 +186,32 @@ describe("packed metric state facade", () => {
 				lastFetch: 1,
 				lastIngest: 1,
 				zones: [{ zone: "example.com", rows: [{ method: "GET", count: 1 }] }],
+			}),
+		).toEqual(["example.com"]);
+	});
+
+	it("discovers scopes from packed cache miss rows", () => {
+		expect(
+			packedMetricScopes({
+				format: "cache-miss-packed-by-zone-v1",
+				accountId: "account-id",
+				accountName: "Account",
+				queryName: "cache-miss-metrics",
+				lastFetch: 1,
+				lastIngest: 1,
+				zones: [
+					{
+						zone: "example.com",
+						rows: [
+							{
+								country: "US",
+								host: "a.example.com",
+								count: 1,
+								avgOriginDurationMs: 123,
+							},
+						],
+					},
+				],
 			}),
 		).toEqual(["example.com"]);
 	});

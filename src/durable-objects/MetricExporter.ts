@@ -27,6 +27,11 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
+	CACHE_MISS_METRICS_QUERY_NAME,
+	type CacheMissZone,
+	type PackedCacheMissMetricState,
+} from "../lib/packed-cache-miss-state";
+import {
 	accumulatePackedMetricState,
 	isMetricDefinitionPackedQuery,
 	isPackedMetricQuery,
@@ -694,6 +699,9 @@ export class MetricExporter extends DurableObject<Env> {
 			const packedRequestMethod =
 				queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
 				packedMetricStorageEnabled(queryName, config);
+			const packedCacheMiss =
+				queryName === CACHE_MISS_METRICS_QUERY_NAME &&
+				packedMetricStorageEnabled(queryName, config);
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
@@ -712,6 +720,23 @@ export class MetricExporter extends DurableObject<Env> {
 						metrics: [],
 						packedMetricState: packed.state,
 						packedCounters: packed.counters,
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
+				if (packedCacheMiss) {
+					return {
+						metrics: [],
+						packedMetricState: this.buildPackedCacheMissState(
+							state,
+							await client.getPackedCacheMissZones(
+								zoneIds,
+								zonesToQuery,
+								timeRange,
+							),
+							ingestId,
+						),
 						partialErrors: [],
 						failedScopes: new Set(),
 						zoneRetryAfter: {},
@@ -761,27 +786,38 @@ export class MetricExporter extends DurableObject<Env> {
 			let longestRetryError: unknown;
 			let longestRetrySeconds = config.metricRefreshIntervalSeconds;
 			const requestMethodRows: RequestMethodZone[] = [];
+			const cacheMissRows: CacheMissZone[] = [];
 			for (let i = 0; i < queryableZones.length; i += ZONES_PER_CHUNK) {
 				const chunkZones = queryableZones.slice(i, i + ZONES_PER_CHUNK);
 				const chunkIds = chunkZones.map((z) => z.id);
 
 				try {
-					const metrics = packedRequestMethod
-						? []
-						: await client.getZoneMetrics(
-								queryName,
-								chunkIds,
-								chunkZones,
-								firewallRules,
-								timeRange,
-								hostMetricsAllowlist,
-								hostMetricsDelaySeconds,
-								config.httpStatusGroup,
-								config.packedMetricStorage,
-							);
+					const metrics =
+						packedRequestMethod || packedCacheMiss
+							? []
+							: await client.getZoneMetrics(
+									queryName,
+									chunkIds,
+									chunkZones,
+									firewallRules,
+									timeRange,
+									hostMetricsAllowlist,
+									hostMetricsDelaySeconds,
+									config.httpStatusGroup,
+									config.packedMetricStorage,
+								);
 					if (packedRequestMethod) {
 						requestMethodRows.push(
 							...(await client.getPackedRequestMethodZones(
+								chunkIds,
+								chunkZones,
+								timeRange,
+							)),
+						);
+					}
+					if (packedCacheMiss) {
+						cacheMissRows.push(
+							...(await client.getPackedCacheMissZones(
 								chunkIds,
 								chunkZones,
 								timeRange,
@@ -834,6 +870,19 @@ export class MetricExporter extends DurableObject<Env> {
 					metrics: [],
 					packedMetricState: packed.state,
 					packedCounters: packed.counters,
+					partialErrors,
+					failedScopes,
+					zoneRetryAfter,
+				};
+			}
+			if (packedCacheMiss) {
+				return {
+					metrics: [],
+					packedMetricState: this.buildPackedCacheMissState(
+						state,
+						cacheMissRows,
+						ingestId,
+					),
 					partialErrors,
 					failedScopes,
 					zoneRetryAfter,
@@ -973,6 +1022,25 @@ export class MetricExporter extends DurableObject<Env> {
 				zones: buildPackedRequestMethodZones(accumulated.observations),
 			},
 			counters: accumulated.counters,
+		};
+	}
+
+	private buildPackedCacheMissState(
+		state: MetricExporterState,
+		zones: readonly CacheMissZone[],
+		ingestId: number,
+	): PackedCacheMissMetricState {
+		return {
+			format: "cache-miss-packed-by-zone-v1",
+			accountId: state.accountId,
+			accountName: state.accountName,
+			queryName: CACHE_MISS_METRICS_QUERY_NAME,
+			lastFetch: Date.now(),
+			lastIngest: ingestId,
+			zones: zones.map((zone) => ({
+				zone: zone.zone,
+				rows: zone.rows.map((row) => ({ ...row })),
+			})),
 		};
 	}
 

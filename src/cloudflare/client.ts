@@ -12,6 +12,11 @@ import {
 } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
 import {
+	CACHE_MISS_METRIC_HELP,
+	CACHE_MISS_METRIC_NAME,
+	type CacheMissZone,
+} from "../lib/packed-cache-miss-state";
+import {
 	REQUEST_METHOD_METRIC_HELP,
 	REQUEST_METHOD_METRIC_NAME,
 	type RequestMethodZone,
@@ -582,6 +587,43 @@ export class CloudflareMetricsClient {
 					.map((group) => ({
 						method: group.dimensions?.clientRequestHTTPMethodName ?? "",
 						count: group.count ?? 0,
+					})),
+			});
+		}
+		return buckets;
+	}
+
+	async getPackedCacheMissZones(
+		zoneIds: string[],
+		zones: Zone[],
+		timeRange: TimeRange,
+	): Promise<CacheMissZone[]> {
+		const result = await this.gql.query(CacheMissMetricsQuery, {
+			zoneIDs: zoneIds,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw new GraphQLError(
+				"Failed to fetch cache miss metrics",
+				result.error.graphQLErrors ?? [],
+				{ context: { zone_ids: zoneIds } },
+			);
+		}
+
+		const buckets: CacheMissZone[] = [];
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			buckets.push({
+				zone: findZoneName(zoneData.zoneTag, zones),
+				rows: (zoneData.httpRequestsAdaptiveGroups ?? [])
+					.filter((group) => group.avg?.originResponseDurationMs != null)
+					.map((group) => ({
+						country: group.dimensions?.clientCountryName ?? "",
+						host: group.dimensions?.clientRequestHTTPHost ?? "",
+						count: group.count ?? 0,
+						avgOriginDurationMs: group.avg?.originResponseDurationMs ?? 0,
 					})),
 			});
 		}
@@ -3129,44 +3171,27 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(CacheMissMetricsQuery, {
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
-
-		if (result.error) {
-			throw new GraphQLError(
-				"Failed to fetch cache miss metrics",
-				result.error.graphQLErrors ?? [],
-				{ context: { zone_ids: zoneIds } },
-			);
-		}
-
 		const cacheMissDuration: MetricDefinition = {
-			name: "cloudflare_zone_cache_miss_origin_duration_seconds",
-			help: "Average origin response duration on cache miss in seconds",
+			name: CACHE_MISS_METRIC_NAME,
+			help: CACHE_MISS_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
-
-			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
-				const dim = group.dimensions;
-				const avgDuration = group.avg?.originResponseDurationMs;
-
-				if (avgDuration != null && group.count != null && group.count > 0) {
-					// Convert milliseconds to seconds
+		for (const zone of await this.getPackedCacheMissZones(
+			zoneIds,
+			zones,
+			timeRange,
+		)) {
+			for (const row of zone.rows) {
+				if (row.count > 0) {
 					cacheMissDuration.values.push({
 						labels: {
-							zone: zoneName,
-							country: dim?.clientCountryName ?? "",
-							host: dim?.clientRequestHTTPHost ?? "",
+							zone: zone.zone,
+							country: row.country,
+							host: row.host,
 						},
-						value: avgDuration / 1000,
+						value: row.avgOriginDurationMs / 1000,
 					});
 				}
 			}
