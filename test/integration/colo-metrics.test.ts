@@ -94,14 +94,17 @@ describe("colo-metrics Durable Object", () => {
 
 		await evictDurableObject(stub);
 		const snapshot = await stub.exportPackedMetrics();
+		if (snapshot?.queryName !== "colo-metrics") {
+			throw new Error("expected a packed colo snapshot");
+		}
 		const expectedRecords =
 			scenario.scale.zones *
 			scenario.scale.colosPerZone *
 			scenario.scale.hostsPerColo;
 		expect(
-			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
+			snapshot.zones.reduce((total, zone) => total + zone.colo.length, 0),
 		).toBe(expectedRecords);
-		for (const zone of snapshot?.zones ?? []) {
+		for (const zone of snapshot.zones) {
 			expect(
 				zone.visits.every(
 					(value) => value === scenario.scale.trafficPerHost.visits,

@@ -359,7 +359,7 @@ describe("MetricExporter packed colo storage", () => {
 		expect(h.storage.values.get("state")).toMatchObject({ lastError: null });
 		const snapshot = await h.exporter.exportPackedMetrics();
 		expect(
-			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
+			snapshot?.zones.reduce((total, zone) => total + zone.misses.length, 0),
 		).toBe(150_000);
 		const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
 		expect(bytes).toBeLessThan(16 * 1024 * 1024);
@@ -384,5 +384,172 @@ describe("MetricExporter packed colo storage", () => {
 		h.setPacked(true);
 		await h.refresh(3);
 		expect(await h.requests()).toEqual([10]);
+	});
+});
+
+// Exercise the real refresh, storage codec, and GraphQL translation for the
+// origin-status packed path; only the platform boundary and upstream HTTP
+// response are replaced by local fixtures.
+async function createOriginStatusHarness() {
+	const storage = new AlarmStorage();
+	const zone = {
+		id: "zone-id",
+		name: "example.com",
+		status: "active",
+		plan: { id: "paid", name: "Paid" },
+		account: { id: "account-id", name: "Account" },
+	};
+	storage.values.set("state", {
+		...storedState(),
+		queryName: "origin-status-metrics",
+		zones: [zone],
+	});
+	let packed = false;
+	let observations = [
+		{ status: 200, country: "US", host: "a.example.com", count: 10 },
+	];
+	vi.stubGlobal("fetch", async () => {
+		return new Response(
+			JSON.stringify({
+				data: {
+					viewer: {
+						zones: [
+							{
+								zoneTag: zone.id,
+								httpRequestsAdaptiveGroups: observations.map((row) => ({
+									dimensions: {
+										originResponseStatus: row.status,
+										clientCountryName: row.country,
+										clientRequestHTTPHost: row.host,
+									},
+									count: row.count,
+								})),
+							},
+						],
+					},
+				},
+			}),
+			{ headers: { "content-type": "application/json" } },
+		);
+	});
+	vi.spyOn(console, "log").mockImplementation(() => {});
+	const env = {
+		CLOUDFLARE_API_TOKEN: "test-token",
+		CONFIG_KV: {
+			get: async () => JSON.stringify({ packedMetricStorage: packed }),
+		},
+		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+	};
+	let { exporter, ready } = createExporter(storage, env);
+	await ready;
+	return {
+		storage,
+		get exporter() {
+			return exporter;
+		},
+		setPacked(enabled: boolean) {
+			packed = enabled;
+		},
+		setObservations(rows: typeof observations) {
+			observations = rows;
+		},
+		async restart() {
+			({ exporter, ready } = createExporter(storage, env));
+			await ready;
+		},
+		async refresh(minute: number) {
+			await exporter.triggerRefresh({
+				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
+				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
+			});
+		},
+		async snapshot() {
+			const state = await exporter.exportPackedMetrics();
+			if (state !== undefined && state.queryName !== "origin-status-metrics") {
+				throw new Error("expected a packed origin status snapshot");
+			}
+			return state;
+		},
+	};
+}
+
+describe("MetricExporter packed origin status storage", () => {
+	it("stores one row per status, country and host under its own key", async () => {
+		const h = await createOriginStatusHarness();
+		h.setPacked(true);
+		h.setObservations([
+			{ status: 200, country: "US", host: "a.example.com", count: 1 },
+			{ status: 502, country: "DE", host: "b.example.com", count: 2 },
+		]);
+		await h.refresh(1);
+
+		const snapshot = await h.snapshot();
+		expect(snapshot?.zones[0]).toMatchObject({
+			zone: "example.com",
+			originStatus: ["200", "502"],
+			country: ["US", "DE"],
+			host: ["a.example.com", "b.example.com"],
+			requests: [1, 2],
+		});
+		// Packed counters live outside the generic state, which stays empty.
+		expect(h.storage.values.get("state")).toMatchObject({
+			metrics: [],
+			counters: {},
+			lastError: null,
+		});
+		expect([...h.storage.values.keys()]).toContain(
+			"packed-origin-status-metrics",
+		);
+		expect([...h.storage.values.keys()]).not.toContain("packed-colo-metrics");
+	});
+
+	it("accumulates across refreshes and restarts without double-counting retries", async () => {
+		const h = await createOriginStatusHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		await h.refresh(2);
+		await h.restart();
+		await h.refresh(2);
+
+		expect((await h.snapshot())?.zones[0]?.requests).toEqual([20]);
+	});
+
+	it("keeps rows out of storage when the flag is disabled", async () => {
+		const h = await createOriginStatusHarness();
+		await h.refresh(1);
+
+		expect(await h.snapshot()).toBeUndefined();
+		expect([...h.storage.values.keys()]).not.toContain(
+			"packed-origin-status-metrics",
+		);
+		// The unpacked path still accumulates into the generic state.
+		const metrics = await h.exporter.export();
+		expect(
+			metrics.find(
+				(metric) =>
+					metric.name ===
+					"cloudflare_zone_requests_origin_status_country_host_total",
+			)?.values[0],
+		).toMatchObject({ value: 10 });
+	});
+
+	it("starts a fresh packed generation after the flag was disabled", async () => {
+		const h = await createOriginStatusHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		expect((await h.snapshot())?.zones[0]?.requests).toEqual([10]);
+
+		h.setPacked(false);
+		await h.refresh(2);
+		expect(await h.snapshot()).toBeUndefined();
+		expect(
+			[...h.storage.values.keys()].filter((key) =>
+				key.startsWith("packed-origin-status-metrics"),
+			),
+		).toEqual([]);
+
+		h.setPacked(true);
+		await h.refresh(3);
+		expect((await h.snapshot())?.zones[0]?.requests).toEqual([10]);
 	});
 });

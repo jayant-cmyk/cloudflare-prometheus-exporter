@@ -4,45 +4,82 @@ import {
 	accumulatePackedMetricState,
 	isPackedMetricQuery,
 	PACKED_METRIC_QUERIES,
-	PACKED_METRIC_STATE_KEY,
 	packedMetricScopes,
+	packedMetricStateKey,
 	packedMetricStorageEnabled,
 } from "./packed-metric-state";
 
-const labels = { zone: "example.com", colo: "SJC", host: "www.example.com" };
+const coloLabels = {
+	zone: "example.com",
+	colo: "SJC",
+	host: "www.example.com",
+};
 
-const metrics: MetricDefinition[] = [
+const coloMetrics: MetricDefinition[] = [
 	{
 		name: "cloudflare_zone_colocation_visits_total",
 		help: "Visits per colo",
 		type: "counter",
-		values: [{ labels, value: 2 }],
+		values: [{ labels: coloLabels, value: 2 }],
 	},
 	{
 		name: "cloudflare_zone_colocation_edge_response_bytes_total",
 		help: "Edge response bytes per colo",
 		type: "counter",
-		values: [{ labels, value: 3 }],
+		values: [{ labels: coloLabels, value: 3 }],
 	},
 	{
 		name: "cloudflare_zone_colocation_requests_total",
 		help: "Requests per colo",
 		type: "counter",
-		values: [{ labels, value: 4 }],
+		values: [{ labels: coloLabels, value: 4 }],
+	},
+];
+
+const originStatusMetrics: MetricDefinition[] = [
+	{
+		name: "cloudflare_zone_requests_origin_status_country_host_total",
+		help: "Requests by origin status, country, and host",
+		type: "counter",
+		values: [
+			{
+				labels: {
+					zone: "example.com",
+					origin_status: "200",
+					country: "US",
+					host: "www.example.com",
+				},
+				value: 7,
+			},
+		],
 	},
 ];
 
 describe("packed metric state facade", () => {
-	it("keeps the shipped colo storage key while exposing generic query selection", () => {
-		expect(PACKED_METRIC_STATE_KEY).toBe("packed-colo-metrics");
-		expect(PACKED_METRIC_QUERIES).toEqual(["colo-metrics"]);
+	it("registers every packed query with its own storage key", () => {
+		expect(PACKED_METRIC_QUERIES).toEqual([
+			"colo-metrics",
+			"origin-status-metrics",
+		]);
 		expect(isPackedMetricQuery("colo-metrics")).toBe(true);
-		expect(isPackedMetricQuery("origin-status-metrics")).toBe(false);
-		expect(
-			packedMetricStorageEnabled("colo-metrics", {
-				coloMetricsPackedStorage: true,
-			}),
-		).toBe(true);
+		expect(isPackedMetricQuery("origin-status-metrics")).toBe(true);
+		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(false);
+		// Colo keeps its shipped key so deployed DOs keep their accumulated state.
+		expect(packedMetricStateKey("colo-metrics")).toBe("packed-colo-metrics");
+		expect(packedMetricStateKey("origin-status-metrics")).toBe(
+			"packed-origin-status-metrics",
+		);
+	});
+
+	it("resolves the shared rollout flag for every packed query", () => {
+		for (const query of PACKED_METRIC_QUERIES) {
+			expect(
+				packedMetricStorageEnabled(query, { packedMetricStorage: true }),
+			).toBe(true);
+			expect(
+				packedMetricStorageEnabled(query, { packedMetricStorage: false }),
+			).toBe(false);
+		}
 	});
 
 	it("dispatches accumulation and scope discovery to the colo codec", () => {
@@ -52,7 +89,7 @@ describe("packed metric state facade", () => {
 			accountId: "account-id",
 			accountName: "Account",
 			previous: undefined,
-			metrics,
+			metrics: coloMetrics,
 			ingestId: 10,
 			failedScopes: new Set(),
 		});
@@ -73,5 +110,60 @@ describe("packed metric state facade", () => {
 			requests: [4],
 		});
 		expect(packedMetricScopes(state)).toEqual(["example.com"]);
+	});
+
+	it("dispatches accumulation and scope discovery to the origin status codec", () => {
+		vi.spyOn(Date, "now").mockReturnValue(456);
+		const state = accumulatePackedMetricState({
+			queryName: "origin-status-metrics",
+			accountId: "account-id",
+			accountName: "Account",
+			previous: undefined,
+			metrics: originStatusMetrics,
+			ingestId: 20,
+			failedScopes: new Set(),
+		});
+
+		expect(state).toMatchObject({
+			format: "origin-status-packed-by-zone-v1",
+			queryName: "origin-status-metrics",
+			lastFetch: 456,
+			lastIngest: 20,
+		});
+		expect(state.zones[0]).toMatchObject({
+			zone: "example.com",
+			originStatus: ["200"],
+			country: ["US"],
+			host: ["www.example.com"],
+			requests: [7],
+		});
+		expect(packedMetricScopes(state)).toEqual(["example.com"]);
+	});
+
+	it("ignores a snapshot left over from a different packed query", () => {
+		const colo = accumulatePackedMetricState({
+			queryName: "colo-metrics",
+			accountId: "account-id",
+			accountName: "Account",
+			previous: undefined,
+			metrics: coloMetrics,
+			ingestId: 10,
+			failedScopes: new Set(),
+		});
+
+		// Seeding the origin status codec with a colo snapshot must not adopt its
+		// rows; a mismatched snapshot is treated as absent.
+		const state = accumulatePackedMetricState({
+			queryName: "origin-status-metrics",
+			accountId: "account-id",
+			accountName: "Account",
+			previous: colo,
+			metrics: originStatusMetrics,
+			ingestId: 20,
+			failedScopes: new Set(),
+		});
+
+		expect(state.zones).toHaveLength(1);
+		expect(state.zones[0]).toMatchObject({ requests: [7] });
 	});
 });

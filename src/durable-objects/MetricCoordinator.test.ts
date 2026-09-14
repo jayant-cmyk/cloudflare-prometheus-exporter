@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MetricDefinition } from "../lib/metrics";
-import type { PackedColoZone } from "../lib/packed-colo-state";
-import type { PackedMetricState } from "../lib/packed-metric-state";
+import type {
+	PackedColoMetricState,
+	PackedColoZone,
+} from "../lib/packed-colo-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { MetricCoordinator } from "./MetricCoordinator";
 
@@ -9,7 +11,7 @@ const requestsName = "cloudflare_zone_colocation_requests_total";
 
 type Row = { host: string; value: number; misses?: number };
 
-function packedState(rows: Row[]): PackedMetricState {
+function packedState(rows: Row[]): PackedColoMetricState {
 	const zone: PackedColoZone = {
 		zone: "example.com",
 		colo: rows.map(() => "SJC"),
@@ -31,7 +33,7 @@ function packedState(rows: Row[]): PackedMetricState {
 	};
 }
 
-function expectedMetrics(state: PackedMetricState): MetricDefinition[] {
+function expectedMetrics(state: PackedColoMetricState): MetricDefinition[] {
 	return (
 		[
 			["cloudflare_zone_colocation_visits_total", "Visits per colo", "visits"],
@@ -56,7 +58,7 @@ function expectedMetrics(state: PackedMetricState): MetricDefinition[] {
 }
 
 async function createCoordinator(
-	packedStates: PackedMetricState[],
+	packedStates: PackedColoMetricState[],
 	legacy: MetricDefinition[] = [],
 	overrides: {
 		excludeHost?: boolean;
@@ -93,7 +95,7 @@ async function createCoordinator(
 				// Mirrors AccountMetricCoordinator: the caller's mode decides which
 				// representation packed metrics use for this scrape.
 				exportForPrometheus: async (options: {
-					packedMetricQueries: readonly "colo-metrics"[];
+					packedMetricQueries: readonly string[];
 				}) => {
 					const packedStorage =
 						options.packedMetricQueries.includes("colo-metrics");

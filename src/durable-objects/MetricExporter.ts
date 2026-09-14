@@ -25,10 +25,10 @@ import {
 import {
 	accumulatePackedMetricState,
 	isPackedMetricQuery,
-	PACKED_METRIC_STATE_KEY,
 	type PackedMetricQuery,
 	type PackedMetricState,
 	PackedMetricStateSchema,
+	packedMetricStateKey,
 	packedMetricStorageEnabled,
 } from "../lib/packed-metric-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
@@ -452,7 +452,7 @@ export class MetricExporter extends DurableObject<Env> {
 				// flag starts a fresh counter generation instead of reviving old totals.
 				await deleteChunkedValue(
 					chunkedDurableObjectStorage(this.ctx.storage),
-					PACKED_METRIC_STATE_KEY,
+					packedMetricStateKey(state.queryName),
 				);
 			}
 			const processed = accumulateCounterMetrics(
@@ -649,7 +649,7 @@ export class MetricExporter extends DurableObject<Env> {
 						hostMetricsAllowlist,
 						hostMetricsDelaySeconds,
 						config.httpStatusGroup,
-						config.coloMetricsPackedStorage,
+						config.packedMetricStorage,
 					),
 					partialErrors: [],
 					failedScopes: new Set(),
@@ -696,7 +696,7 @@ export class MetricExporter extends DurableObject<Env> {
 						hostMetricsAllowlist,
 						hostMetricsDelaySeconds,
 						config.httpStatusGroup,
-						config.coloMetricsPackedStorage,
+						config.packedMetricStorage,
 					);
 					for (const zoneId of chunkIds) delete zoneRetryAfter[zoneId];
 					chunkResults.push(metrics);
@@ -780,12 +780,12 @@ export class MetricExporter extends DurableObject<Env> {
 		}
 	}
 
-	private async loadPackedMetricState(): Promise<
-		PackedMetricState | undefined
-	> {
+	private async loadPackedMetricState(
+		queryName: PackedMetricQuery,
+	): Promise<PackedMetricState | undefined> {
 		return loadChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			PACKED_METRIC_STATE_KEY,
+			packedMetricStateKey(queryName),
 			PackedMetricStateSchema,
 		);
 	}
@@ -797,10 +797,10 @@ export class MetricExporter extends DurableObject<Env> {
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
-		const previous = await this.loadPackedMetricState();
+		const previous = await this.loadPackedMetricState(queryName);
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			PACKED_METRIC_STATE_KEY,
+			packedMetricStateKey(queryName),
 			accumulatePackedMetricState({
 				queryName,
 				accountId: state.accountId,
@@ -840,6 +840,6 @@ export class MetricExporter extends DurableObject<Env> {
 		) {
 			return undefined;
 		}
-		return this.loadPackedMetricState();
+		return this.loadPackedMetricState(state.queryName);
 	}
 }

@@ -1,10 +1,14 @@
 import { z } from "zod";
 import type { MetricDefinition } from "./metrics";
+import {
+	accumulateColumnarZones,
+	type ColumnarFamily,
+	type ColumnarZoneRows,
+	observeColumnarWindow,
+} from "./packed-columnar-state";
 
 /** Query name whose counters use the packed colo storage format. */
 export const COLO_METRICS_QUERY_NAME = "colo-metrics";
-
-const STALE_COUNTER_MISSES = 5;
 
 /**
  * Columnar counters for one zone: row `i` is `colo[i]`, `host[i]`, ... .
@@ -51,69 +55,33 @@ export type PackedColoMetricState = z.infer<typeof PackedColoMetricStateSchema>;
 /** Packed value column exported by each Prometheus family. */
 export type PackedColoValueColumn = "visits" | "edgeResponseBytes" | "requests";
 
-export const PACKED_COLO_METRIC_FAMILIES: readonly {
-	name: string;
-	help: string;
-	column: PackedColoValueColumn;
-}[] = [
+/** Value columns in value-slot order, as read by the sample source. */
+const COLO_VALUE_COLUMNS: readonly PackedColoValueColumn[] = [
+	"visits",
+	"edgeResponseBytes",
+	"requests",
+];
+
+/** Row key labels in export order, following the zone label. */
+export const COLO_KEY_LABELS: readonly string[] = ["colo", "host"];
+
+export const PACKED_COLO_METRIC_FAMILIES: readonly ColumnarFamily[] = [
 	{
 		name: "cloudflare_zone_colocation_visits_total",
 		help: "Visits per colo",
-		column: "visits",
+		valueIndex: 0,
 	},
 	{
 		name: "cloudflare_zone_colocation_edge_response_bytes_total",
 		help: "Edge response bytes per colo",
-		column: "edgeResponseBytes",
+		valueIndex: 1,
 	},
 	{
 		name: "cloudflare_zone_colocation_requests_total",
 		help: "Requests per colo",
-		column: "requests",
+		valueIndex: 2,
 	},
 ];
-
-type ObservedRow = {
-	zone: string;
-	colo: string;
-	host: string;
-	visits: number;
-	edgeResponseBytes: number;
-	requests: number;
-};
-
-function rowKey(zone: string, colo: string, host: string): string {
-	return `${zone}\x00${colo}\x00${host}`;
-}
-
-function observeWindow(
-	metrics: readonly MetricDefinition[],
-): Map<string, ObservedRow> {
-	const observed = new Map<string, ObservedRow>();
-	for (const metric of metrics) {
-		const family = PACKED_COLO_METRIC_FAMILIES.find(
-			(f) => f.name === metric.name,
-		);
-		if (family === undefined) continue;
-		for (const { labels, value } of metric.values) {
-			const zone = labels.zone ?? "";
-			const colo = labels.colo ?? "";
-			const host = labels.host ?? "";
-			const key = rowKey(zone, colo, host);
-			const row = observed.get(key) ?? {
-				zone,
-				colo,
-				host,
-				visits: 0,
-				edgeResponseBytes: 0,
-				requests: 0,
-			};
-			row[family.column] += value;
-			observed.set(key, row);
-		}
-	}
-	return observed;
-}
 
 function emptyZone(zone: string): PackedColoZone {
 	return {
@@ -128,25 +96,50 @@ function emptyZone(zone: string): PackedColoZone {
 	};
 }
 
-function pushRow(
-	target: PackedColoZone,
-	row: Omit<ObservedRow, "zone">,
-	misses: number,
-	lastIngest: number,
-): void {
-	target.colo.push(row.colo);
-	target.host.push(row.host);
-	target.visits.push(row.visits);
-	target.edgeResponseBytes.push(row.edgeResponseBytes);
-	target.requests.push(row.requests);
-	target.misses.push(misses);
-	target.lastIngest.push(lastIngest);
+/** Expands packed columns into neutral rows for the shared accumulator. */
+function toColumnarZones(zones: readonly PackedColoZone[]): ColumnarZoneRows[] {
+	return zones.map((zone) => ({
+		zone: zone.zone,
+		rows: zone.colo.map((colo, index) => ({
+			keys: [colo, zone.host[index] ?? ""],
+			values: [
+				zone.visits[index] ?? 0,
+				zone.edgeResponseBytes[index] ?? 0,
+				zone.requests[index] ?? 0,
+			],
+			misses: zone.misses[index] ?? 0,
+			lastIngest: zone.lastIngest[index] ?? 0,
+		})),
+	}));
+}
+
+/** Collapses neutral rows back into packed columns for storage. */
+function toPackedZones(zones: readonly ColumnarZoneRows[]): PackedColoZone[] {
+	return zones.map((bucket) => {
+		const packed = emptyZone(bucket.zone);
+		for (const row of bucket.rows) {
+			packed.colo.push(row.keys[0] ?? "");
+			packed.host.push(row.keys[1] ?? "");
+			packed.visits.push(row.values[0] ?? 0);
+			packed.edgeResponseBytes.push(row.values[1] ?? 0);
+			packed.requests.push(row.values[2] ?? 0);
+			packed.misses.push(row.misses);
+			packed.lastIngest.push(row.lastIngest);
+		}
+		return packed;
+	});
 }
 
 /**
  * Accumulate one query window into packed colo counters.
  * Replaying the same `ingestId` is idempotent; rows unseen for five windows expire.
  * Rows in `failedScopes` (zones whose query failed) are neither aged nor expired.
+ *
+ * @param previous Previously stored packed colo snapshot.
+ * @param metrics Metrics returned for the current query window.
+ * @param ingestId Stable identifier of the current query window.
+ * @param failedScopes Zone labels whose query failed this refresh.
+ * @returns Packed colo zones ready for storage.
  */
 export function accumulatePackedColoRows(
 	previous: PackedColoMetricState | undefined,
@@ -154,61 +147,43 @@ export function accumulatePackedColoRows(
 	ingestId: number,
 	failedScopes: ReadonlySet<string>,
 ): PackedColoZone[] {
-	const ageMissing = previous?.lastIngest !== ingestId;
-	const observed = observeWindow(metrics);
-	const next = new Map<string, PackedColoZone>();
-	const zoneFor = (zone: string): PackedColoZone => {
-		const existing = next.get(zone);
-		if (existing !== undefined) return existing;
-		const created = emptyZone(zone);
-		next.set(zone, created);
-		return created;
-	};
+	return toPackedZones(
+		accumulateColumnarZones(
+			toColumnarZones(previous?.zones ?? []),
+			observeColumnarWindow(
+				metrics,
+				PACKED_COLO_METRIC_FAMILIES,
+				COLO_KEY_LABELS,
+				COLO_VALUE_COLUMNS.length,
+			),
+			ingestId,
+			previous?.lastIngest !== ingestId,
+			failedScopes,
+		),
+	);
+}
 
-	for (const bucket of previous?.zones ?? []) {
-		const target = zoneFor(bucket.zone);
-		for (let i = 0; i < bucket.colo.length; i++) {
-			const colo = bucket.colo[i] ?? "";
-			const host = bucket.host[i] ?? "";
-			const stored = {
-				colo,
-				host,
-				visits: bucket.visits[i] ?? 0,
-				edgeResponseBytes: bucket.edgeResponseBytes[i] ?? 0,
-				requests: bucket.requests[i] ?? 0,
-			};
-			const misses = bucket.misses[i] ?? 0;
-			const lastIngest = bucket.lastIngest[i] ?? 0;
-			const key = rowKey(bucket.zone, colo, host);
-			const seen = observed.get(key);
-			if (seen !== undefined) {
-				observed.delete(key);
-				// Retries can replay the same Cloudflare window; only add it once.
-				const skip = lastIngest === ingestId;
-				pushRow(
-					target,
-					{
-						colo,
-						host,
-						visits: stored.visits + (skip ? 0 : seen.visits),
-						edgeResponseBytes:
-							stored.edgeResponseBytes + (skip ? 0 : seen.edgeResponseBytes),
-						requests: stored.requests + (skip ? 0 : seen.requests),
-					},
-					STALE_COUNTER_MISSES,
-					ingestId,
-				);
-			} else if (!ageMissing || failedScopes.has(bucket.zone)) {
-				pushRow(target, stored, misses, lastIngest);
-			} else if (misses > 1) {
-				pushRow(target, stored, misses - 1, lastIngest);
+/** Reads packed colo columns lazily, one sample per stored row. */
+export function packedColoSamples(states: readonly PackedColoMetricState[]): (
+	valueIndex: number,
+) => Generator<{
+	zone: string;
+	keys: readonly string[];
+	value: number;
+}> {
+	return function* samples(valueIndex) {
+		const column = COLO_VALUE_COLUMNS[valueIndex] ?? "visits";
+		for (const state of states) {
+			for (const bucket of state.zones) {
+				const values = bucket[column];
+				for (let index = 0; index < bucket.colo.length; index++) {
+					yield {
+						zone: bucket.zone,
+						keys: [bucket.colo[index] ?? "", bucket.host[index] ?? ""],
+						value: values[index] ?? 0,
+					};
+				}
 			}
 		}
-	}
-
-	for (const row of observed.values()) {
-		pushRow(zoneFor(row.zone), row, STALE_COUNTER_MISSES, ingestId);
-	}
-
-	return [...next.values()].filter((zone) => zone.colo.length > 0);
+	};
 }

@@ -1488,7 +1488,7 @@ export class CloudflareMetricsClient {
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
 	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
 	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
-	 * @param coloMetricsPackedStorage Whether to use the reduced colo query for packed storage.
+	 * @param packedMetricStorage Whether packed storage is enabled, allowing colo-metrics to use its reduced query.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -1501,7 +1501,7 @@ export class CloudflareMetricsClient {
 		hostMetricsAllowlist?: ReadonlySet<string>,
 		hostMetricsDelaySeconds?: number,
 		httpStatusGroup = false,
-		coloMetricsPackedStorage = false,
+		packedMetricStorage = false,
 	): Promise<MetricDefinition[]> {
 		this.logger.info("Fetching zone metrics", {
 			query,
@@ -1526,7 +1526,7 @@ export class CloudflareMetricsClient {
 					zoneIds,
 					zones,
 					timeRange,
-					coloMetricsPackedStorage,
+					packedMetricStorage,
 				);
 			case "colo-error-metrics":
 				return this.getColoErrorMetrics(zoneIds, zones, timeRange);
@@ -2216,12 +2216,10 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
-		coloMetricsPackedStorage = false,
+		packedMetricStorage = false,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(
-			coloMetricsPackedStorage
-				? ColoMetricsPackedStorageQuery
-				: ColoMetricsQuery,
+			packedMetricStorage ? ColoMetricsPackedStorageQuery : ColoMetricsQuery,
 			{
 				zoneIDs: zoneIds,
 				mintime: timeRange.mintime,
