@@ -1,0 +1,19 @@
+src/durable-objects/MetricExporter.test.ts
+  s_af1050dd987516::t_68d2d70c8c18af 312,339-341,343,360,378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a19dbcb4696cca009f58589242a578b0c8f64774",
+  "prompts": {},
+  "sessions": {
+    "s_af1050dd987516": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5f95dbe0ffezY6HTbJ8zjQyyo",
+        "model": "@cf/zai-org/glm-5.3-flash"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
