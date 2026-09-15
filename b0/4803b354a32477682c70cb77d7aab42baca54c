@@ -1,0 +1,41 @@
+src/cloudflare/client.ts
+  s_faa18202457d53::t_2dc8beb0a3a59c 19-28,34-38,648-742,3175-3176,3181-3194,3386-3387,3393-3402,3419-3420,3425-3426,3429-3430,3433-3436,3438,3457-3458,3463-3471,3487-3488,3493-3501
+src/durable-objects/AccountMetricCoordinator.ts
+  s_faa18202457d53::t_7b1cc12d2c2845 373,377-379,381-382,391,398-420,452-454
+src/durable-objects/MetricExporter.ts
+  s_faa18202457d53::t_05a499bc2c7615 34-43,62-66,442-447,463-466,511,720-722,763-779,825,832,863-871,936-948,978-980,984-1023,1028-1033,1035-1040,1043-1048,1161-1221,1243
+src/lib/packed-colo-error-prometheus.ts
+  s_faa18202457d53::t_247dfef481eb88 1-20
+src/lib/packed-lb-weight-prometheus.test.ts
+  s_faa18202457d53::t_6b379d16da60ee 1-71
+src/lib/packed-logpush-zone-prometheus.test.ts
+  s_faa18202457d53::t_7e5f7b5ac3f8b2 1-65
+src/lib/packed-metric-state.ts
+  s_faa18202457d53::t_fac264423105f2 7-11,17-24,34-37,41-42,44-45,48,53,66-67,69-70,73,81-82,84-85,88,113,120-121,123,169-180,205-210
+src/lib/packed-ssl-certificates-prometheus.test.ts
+  s_faa18202457d53::t_89ff59d36eeb9b 1-71
+test/integration/colo-error-metrics.test.ts
+  s_faa18202457d53::t_328039d50bfdc6 1-138
+test/integration/lb-weight-metrics.test.ts
+  s_faa18202457d53::t_7ff4fddfeef6e8 1-98
+test/integration/logpush-zone.test.ts
+  s_faa18202457d53::t_875c1d054a2667 1-112
+test/integration/ssl-certificates.test.ts
+  s_faa18202457d53::t_392922a17ef7fb 1-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b04803b354a32477682c70cb77d7aab42baca54c",
+  "prompts": {},
+  "sessions": {
+    "s_faa18202457d53": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5f3fdb01ffe9qAbM0EKERoVPX",
+        "model": "gpt-5.4"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
