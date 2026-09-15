@@ -10,7 +10,6 @@ const HELP = "Average origin response duration on cache miss in seconds";
 type Row = {
 	country: string;
 	host: string;
-	count: number;
 	avgOriginDurationMs: number;
 };
 
@@ -35,12 +34,10 @@ function unpacked(rows: Row[], zone = "example.com"): MetricDefinition[] {
 			name: METRIC_NAME,
 			help: HELP,
 			type: "gauge",
-			values: rows
-				.filter((row) => row.count > 0)
-				.map((row) => ({
-					labels: { zone, country: row.country, host: row.host },
-					value: row.avgOriginDurationMs / 1000,
-				})),
+			values: rows.map((row) => ({
+				labels: { zone, country: row.country, host: row.host },
+				value: row.avgOriginDurationMs / 1000,
+			})),
 		},
 	];
 }
@@ -58,13 +55,11 @@ describe("serializePackedCacheMissMetrics", () => {
 			{
 				country: "US",
 				host: "a.example.com",
-				count: 4,
 				avgOriginDurationMs: 1250,
 			},
 			{
 				country: "DE",
 				host: "b.example.com",
-				count: 2,
 				avgOriginDurationMs: 500,
 			},
 		];
@@ -74,31 +69,16 @@ describe("serializePackedCacheMissMetrics", () => {
 		);
 	});
 
-	it("skips rows whose count is zero", () => {
-		const rows: Row[] = [
-			{
-				country: "US",
-				host: "a.example.com",
-				count: 0,
-				avgOriginDurationMs: 900,
-			},
-		];
-
-		expect(serialize([packedState(rows)])).toBe("");
-	});
-
 	it("matches legacy gauge aggregation when host is excluded", () => {
 		const rows: Row[] = [
 			{
 				country: "US",
 				host: "a.example.com",
-				count: 1,
 				avgOriginDurationMs: 500,
 			},
 			{
 				country: "US",
 				host: "b.example.com",
-				count: 1,
 				avgOriginDurationMs: 900,
 			},
 		];

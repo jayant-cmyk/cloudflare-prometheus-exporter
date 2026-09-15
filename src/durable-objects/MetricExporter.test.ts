@@ -487,7 +487,7 @@ async function createOriginStatusHarness() {
 }
 
 describe("MetricExporter packed origin status storage", () => {
-	it("stores one row per status, country and host under its own key", async () => {
+	it("stores one row per status, country and host", async () => {
 		const h = await createOriginStatusHarness();
 		h.setPacked(true);
 		h.setObservations([
@@ -510,10 +510,7 @@ describe("MetricExporter packed origin status storage", () => {
 			counters: {},
 			lastError: null,
 		});
-		expect([...h.storage.values.keys()]).toContain(
-			"packed-origin-status-metrics",
-		);
-		expect([...h.storage.values.keys()]).not.toContain("packed-colo-metrics");
+		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
 	});
 
 	it("accumulates across refreshes and restarts without double-counting retries", async () => {
@@ -532,9 +529,7 @@ describe("MetricExporter packed origin status storage", () => {
 		await h.refresh(1);
 
 		expect(await h.snapshot()).toBeUndefined();
-		expect([...h.storage.values.keys()]).not.toContain(
-			"packed-origin-status-metrics",
-		);
+		expect([...h.storage.values.keys()]).not.toContain("packed-colo-metrics");
 		// The unpacked path still accumulates into the generic state.
 		const metrics = await h.exporter.export();
 		expect(
@@ -557,7 +552,7 @@ describe("MetricExporter packed origin status storage", () => {
 		expect(await h.snapshot()).toBeUndefined();
 		expect(
 			[...h.storage.values.keys()].filter((key) =>
-				key.startsWith("packed-origin-status-metrics"),
+				key.startsWith("packed-colo-metrics"),
 			),
 		).toEqual([]);
 
@@ -689,7 +684,7 @@ describe("MetricExporter packed adaptive storage", () => {
 			metrics: [],
 			lastError: null,
 		});
-		expect([...h.storage.values.keys()]).toContain("packed-adaptive-metrics");
+		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
 	});
 
 	it("accumulates counter rows across refreshes and keeps current rate inputs", async () => {
@@ -819,9 +814,7 @@ describe("MetricExporter packed request method storage", () => {
 			metrics: [],
 			lastError: null,
 		});
-		expect([...h.storage.values.keys()]).toContain(
-			"packed-request-method-metrics",
-		);
+		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
 	});
 
 	it("accumulates across refreshes from compact state", async () => {
@@ -967,14 +960,7 @@ describe("MetricExporter packed cache miss storage", () => {
 					{
 						country: "US",
 						host: "a.example.com",
-						count: 3,
 						avgOriginDurationMs: 900,
-					},
-					{
-						country: "DE",
-						host: "b.example.com",
-						count: 0,
-						avgOriginDurationMs: 400,
 					},
 				],
 			},
@@ -984,7 +970,7 @@ describe("MetricExporter packed cache miss storage", () => {
 			counters: {},
 			lastError: null,
 		});
-		expect([...h.storage.values.keys()]).toContain("packed-cache-miss-metrics");
+		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
 	});
 
 	it("uses the legacy gauge metric when the flag is disabled", async () => {
@@ -1113,17 +1099,24 @@ describe("MetricExporter additional packed storage", () => {
 			LOG_LEVEL: "error",
 			...env,
 		} as unknown as Env);
-		vi.spyOn(client, "getPackedSSLCertificateZone").mockResolvedValue({
-			zone: zone.name,
-			rows: [
-				{
-					type: "advanced",
-					issuer: "letsencrypt",
-					status: "active",
-					expiresOnSeconds: 1_735_689_600,
-				},
-			],
-		});
+		vi.spyOn(client, "getSSLCertificateMetricsForZone").mockResolvedValue([
+			{
+				name: "cloudflare_zone_certificate_validation_status",
+				help: "Certificate expiry timestamp",
+				type: "gauge",
+				values: [
+					{
+						labels: {
+							zone: zone.name,
+							type: "advanced",
+							issuer: "letsencrypt",
+							status: "active",
+						},
+						value: 1_735_689_600,
+					},
+				],
+			},
+		]);
 		const { exporter, ready } = createExporter(storage, env);
 		await ready;
 
@@ -1181,17 +1174,24 @@ describe("MetricExporter additional packed storage", () => {
 			LOG_LEVEL: "error",
 			...env,
 		} as unknown as Env);
-		vi.spyOn(client, "getPackedLbWeightZone").mockResolvedValue({
-			zone: zone.name,
-			rows: [
-				{
-					lbName: "public",
-					poolName: "primary",
-					originName: "app-1",
-					weight: 0.75,
-				},
-			],
-		});
+		vi.spyOn(client, "getLbWeightMetricsForZone").mockResolvedValue([
+			{
+				name: "cloudflare_zone_lb_origin_weight",
+				help: "Load balancer origin weight (0-1 normalized)",
+				type: "gauge",
+				values: [
+					{
+						labels: {
+							zone: zone.name,
+							lb_name: "public",
+							pool_name: "primary",
+							origin_name: "app-1",
+						},
+						value: 0.75,
+					},
+				],
+			},
+		]);
 		const { exporter, ready } = createExporter(storage, env);
 		await ready;
 

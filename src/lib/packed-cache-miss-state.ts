@@ -10,7 +10,6 @@ export const CACHE_MISS_METRIC_HELP =
 const CacheMissRowSchema = z.object({
 	country: z.string(),
 	host: z.string(),
-	count: z.number(),
 	avgOriginDurationMs: z.number(),
 });
 
@@ -45,7 +44,7 @@ export const PACKED_CACHE_MISS_METRIC_FAMILIES: readonly ColumnarFamily[] = [
 	},
 ];
 
-/** Reads packed cache miss rows lazily, skipping rows whose query count is zero. */
+/** Reads packed cache miss rows lazily. */
 export function packedCacheMissSamples(
 	states: readonly PackedCacheMissMetricState[],
 ): (valueIndex: number) => Generator<{
@@ -57,7 +56,6 @@ export function packedCacheMissSamples(
 		for (const state of states) {
 			for (const bucket of state.zones) {
 				for (const row of bucket.rows) {
-					if (row.count <= 0) continue;
 					yield {
 						zone: bucket.zone,
 						keys: [row.country, row.host],

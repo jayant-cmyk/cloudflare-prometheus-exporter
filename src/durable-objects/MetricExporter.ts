@@ -13,11 +13,7 @@ import {
 	loadChunkedValue,
 	saveChunkedValue,
 } from "../lib/chunked-storage";
-import {
-	accumulateCounterMetrics,
-	accumulateCounterObservations,
-	type CounterObservation,
-} from "../lib/counters";
+import { accumulateCounterMetrics } from "../lib/counters";
 import { parseCommaSeparated, partitionZonesByTier } from "../lib/filters";
 import { configFromEnv, createLogger, type Logger } from "../lib/logger";
 import { getMetricRefreshDelaySeconds } from "../lib/metric-refresh";
@@ -27,50 +23,13 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
-	ADAPTIVE_METRICS_QUERY_NAME,
-	type AdaptiveZone,
-	adaptiveCounterObservations,
-	buildPackedAdaptiveZones,
-	type PackedAdaptiveMetricState,
-} from "../lib/packed-adaptive-state";
-import {
-	CACHE_MISS_METRICS_QUERY_NAME,
-	type CacheMissZone,
-	type PackedCacheMissMetricState,
-} from "../lib/packed-cache-miss-state";
-import {
-	LB_WEIGHT_METRICS_QUERY_NAME,
-	type LbWeightZone,
-	type PackedLbWeightMetricState,
-} from "../lib/packed-lb-weight-state";
-import {
-	LOGPUSH_ZONE_METRICS_QUERY_NAME,
-	type LogpushZone,
-	type PackedLogpushZoneMetricState,
-} from "../lib/packed-logpush-zone-state";
-import {
-	accumulatePackedMetricState,
-	isMetricDefinitionPackedQuery,
+	accumulatePackedMetricStateWithCounters,
 	isPackedMetricQuery,
-	type MetricDefinitionPackedQuery,
+	PACKED_METRIC_STATE_KEY,
 	type PackedMetricQuery,
 	type PackedMetricState,
 	PackedMetricStateSchema,
-	packedMetricStateKey,
-	packedMetricStorageEnabled,
 } from "../lib/packed-metric-state";
-import {
-	buildPackedRequestMethodZones,
-	type PackedRequestMethodMetricState,
-	REQUEST_METHOD_METRIC_NAME,
-	REQUEST_METHOD_METRICS_QUERY_NAME,
-	type RequestMethodZone,
-} from "../lib/packed-request-method-state";
-import {
-	type PackedSSLCertificateMetricState,
-	SSL_CERTIFICATES_QUERY_NAME,
-	type SSLCertificateZone,
-} from "../lib/packed-ssl-certificates-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -125,8 +84,6 @@ type MetricExporterState = z.infer<typeof MetricExporterStateSchema>;
 
 type MetricFetchResult = {
 	metrics: MetricDefinition[];
-	packedMetricState?: PackedMetricState;
-	packedCounters?: Record<string, CounterState>;
 	partialErrors: unknown[];
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
@@ -399,7 +356,7 @@ export class MetricExporter extends DurableObject<Env> {
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<void> {
-		let state = this.getState();
+		const state = this.getState();
 
 		// Skip if zone context not yet pushed (account-scoped needs zones)
 		if (state.scopeType === "account" && state.zones.length === 0) {
@@ -419,7 +376,16 @@ export class MetricExporter extends DurableObject<Env> {
 		if (state.scopeType === "zone") {
 			const cacheAgeMs = Date.now() - state.lastSslFetch;
 			const cacheTtlMs = config.sslCertsCacheTtlSeconds * 1000;
-			if (state.lastSslFetch > 0 && cacheAgeMs < cacheTtlMs) {
+			const usePackedStorage =
+				isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
+			const hasCurrentRepresentation = usePackedStorage
+				? (await this.loadPackedMetricState())?.queryName === state.queryName
+				: state.metrics.length > 0;
+			if (
+				state.lastSslFetch > 0 &&
+				cacheAgeMs < cacheTtlMs &&
+				hasCurrentRepresentation
+			) {
 				logger.debug("SSL cert cache fresh, skipping fetch", {
 					age_seconds: Math.floor(cacheAgeMs / 1000),
 					ttl_seconds: config.sslCertsCacheTtlSeconds,
@@ -434,61 +400,28 @@ export class MetricExporter extends DurableObject<Env> {
 
 		try {
 			let result: MetricFetchResult;
-			const ingestId = new Date(timeRange.maxtime).getTime();
 
 			if (state.scopeType === "account") {
 				result = await this.fetchAccountScopedMetrics(
 					client,
 					state,
 					timeRange,
-					ingestId,
 					config,
 					logger,
 				);
 			} else {
-				result = await this.fetchZoneScopedMetrics(
-					client,
-					state,
-					ingestId,
-					config,
-				);
+				result = {
+					metrics: await this.fetchZoneScopedMetrics(client, state),
+					partialErrors: [],
+					failedScopes: new Set(),
+					zoneRetryAfter: {},
+				};
 			}
 
-			if (
-				isPackedMetricQuery(state.queryName) &&
-				packedMetricStorageEnabled(state.queryName, config)
-			) {
+			const ingestId = new Date(timeRange.maxtime).getTime();
+			if (isPackedMetricQuery(state.queryName) && config.packedMetricStorage) {
 				const currentState = this.getState();
-				if (result.packedMetricState !== undefined) {
-					await this.savePackedMetricSnapshot(result.packedMetricState);
-					const refreshedState: MetricExporterState = {
-						...currentState,
-						metrics: [],
-						counters: result.packedCounters ?? {},
-						lastIngest: ingestId,
-						lastRefresh: Date.now(),
-						lastSslFetch:
-							state.scopeType === "zone"
-								? Date.now()
-								: currentState.lastSslFetch,
-						lastError: null,
-						zoneRetryAfter: result.zoneRetryAfter,
-					};
-					await this.saveState(refreshedState);
-					this.state = refreshedState;
-
-					logger.info("Refresh complete", {
-						metric_count: result.packedMetricState.zones.length,
-						partial_failure_count: result.partialErrors.length,
-					});
-					await this.scheduleNextAlarm(config, nextRefreshDelaySeconds);
-					return;
-				}
-				// Packed counters live outside the generic MetricDefinition[] state.
-				if (!isMetricDefinitionPackedQuery(state.queryName)) {
-					throw new Error(`Packed snapshot missing for ${state.queryName}`);
-				}
-				await this.savePackedMetricState(
+				const packedCounters = await this.savePackedMetricState(
 					result.metrics,
 					currentState,
 					state.queryName,
@@ -498,9 +431,11 @@ export class MetricExporter extends DurableObject<Env> {
 				const refreshedState: MetricExporterState = {
 					...currentState,
 					metrics: [],
-					counters: {},
+					counters: packedCounters,
 					lastIngest: ingestId,
 					lastRefresh: Date.now(),
+					lastSslFetch:
+						state.scopeType === "zone" ? Date.now() : currentState.lastSslFetch,
 					lastError: null,
 					zoneRetryAfter: result.zoneRetryAfter,
 				};
@@ -518,24 +453,10 @@ export class MetricExporter extends DurableObject<Env> {
 			if (isPackedMetricQuery(state.queryName)) {
 				// Packed storage is off: drop any packed snapshot so re-enabling the
 				// flag starts a fresh counter generation instead of reviving old totals.
-				const packedSnapshot = await this.loadPackedMetricState(
-					state.queryName,
-				);
 				await deleteChunkedValue(
 					chunkedDurableObjectStorage(this.ctx.storage),
-					packedMetricStateKey(state.queryName),
+					PACKED_METRIC_STATE_KEY,
 				);
-				if (
-					(state.queryName === REQUEST_METHOD_METRICS_QUERY_NAME ||
-						state.queryName === ADAPTIVE_METRICS_QUERY_NAME) &&
-					packedSnapshot !== undefined
-				) {
-					state = {
-						...state,
-						counters: {},
-						lastIngest: 0,
-					};
-				}
 			}
 			const processed = accumulateCounterMetrics(
 				result.metrics,
@@ -622,7 +543,6 @@ export class MetricExporter extends DurableObject<Env> {
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
 		timeRange: TimeRange,
-		ingestId: number,
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<MetricFetchResult> {
@@ -719,95 +639,9 @@ export class MetricExporter extends DurableObject<Env> {
 			// Cloudflare GraphQL API limits queries to 10 zones (zonesHardLimit).
 			// Chunk zones and merge results to support accounts with >10 zones.
 			const ZONES_PER_CHUNK = 10;
-			const packedRequestMethod =
-				queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
-				packedMetricStorageEnabled(queryName, config);
-			const packedAdaptive =
-				queryName === ADAPTIVE_METRICS_QUERY_NAME &&
-				packedMetricStorageEnabled(queryName, config);
-			const packedCacheMiss =
-				queryName === CACHE_MISS_METRICS_QUERY_NAME &&
-				packedMetricStorageEnabled(queryName, config);
-			const packedLogpushZone =
-				queryName === LOGPUSH_ZONE_METRICS_QUERY_NAME &&
-				packedMetricStorageEnabled(queryName, config);
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
-				if (packedAdaptive) {
-					const packed = await this.buildPackedAdaptiveState(
-						state,
-						await client.getPackedAdaptiveZones(
-							zoneIds,
-							zonesToQuery,
-							timeRange,
-						),
-						ingestId,
-						new Set(),
-					);
-					return {
-						metrics: [],
-						packedMetricState: packed.state,
-						packedCounters: packed.counters,
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
-				}
-				if (packedRequestMethod) {
-					const packed = await this.buildPackedRequestMethodState(
-						state,
-						await client.getPackedRequestMethodZones(
-							zoneIds,
-							zonesToQuery,
-							timeRange,
-						),
-						ingestId,
-						new Set(),
-					);
-					return {
-						metrics: [],
-						packedMetricState: packed.state,
-						packedCounters: packed.counters,
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
-				}
-				if (packedCacheMiss) {
-					return {
-						metrics: [],
-						packedMetricState: this.buildPackedCacheMissState(
-							state,
-							await client.getPackedCacheMissZones(
-								zoneIds,
-								zonesToQuery,
-								timeRange,
-							),
-							ingestId,
-						),
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
-				}
-				if (packedLogpushZone) {
-					return {
-						metrics: [],
-						packedMetricState: this.buildPackedLogpushZoneState(
-							state,
-							await client.getPackedLogpushZoneRows(
-								zoneIds,
-								zonesToQuery,
-								timeRange,
-							),
-							ingestId,
-						),
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
-				}
 				return {
 					metrics: await client.getZoneMetrics(
 						queryName,
@@ -851,68 +685,22 @@ export class MetricExporter extends DurableObject<Env> {
 			let firstChunkError: unknown;
 			let longestRetryError: unknown;
 			let longestRetrySeconds = config.metricRefreshIntervalSeconds;
-			const requestMethodRows: RequestMethodZone[] = [];
-			const adaptiveRows: AdaptiveZone[] = [];
-			const cacheMissRows: CacheMissZone[] = [];
-			const logpushZoneRows: LogpushZone[] = [];
 			for (let i = 0; i < queryableZones.length; i += ZONES_PER_CHUNK) {
 				const chunkZones = queryableZones.slice(i, i + ZONES_PER_CHUNK);
 				const chunkIds = chunkZones.map((z) => z.id);
 
 				try {
-					const metrics =
-						packedAdaptive ||
-						packedRequestMethod ||
-						packedCacheMiss ||
-						packedLogpushZone
-							? []
-							: await client.getZoneMetrics(
-									queryName,
-									chunkIds,
-									chunkZones,
-									firewallRules,
-									timeRange,
-									hostMetricsAllowlist,
-									hostMetricsDelaySeconds,
-									config.httpStatusGroup,
-									config.packedMetricStorage,
-								);
-					if (packedAdaptive) {
-						adaptiveRows.push(
-							...(await client.getPackedAdaptiveZones(
-								chunkIds,
-								chunkZones,
-								timeRange,
-							)),
-						);
-					}
-					if (packedRequestMethod) {
-						requestMethodRows.push(
-							...(await client.getPackedRequestMethodZones(
-								chunkIds,
-								chunkZones,
-								timeRange,
-							)),
-						);
-					}
-					if (packedCacheMiss) {
-						cacheMissRows.push(
-							...(await client.getPackedCacheMissZones(
-								chunkIds,
-								chunkZones,
-								timeRange,
-							)),
-						);
-					}
-					if (packedLogpushZone) {
-						logpushZoneRows.push(
-							...(await client.getPackedLogpushZoneRows(
-								chunkIds,
-								chunkZones,
-								timeRange,
-							)),
-						);
-					}
+					const metrics = await client.getZoneMetrics(
+						queryName,
+						chunkIds,
+						chunkZones,
+						firewallRules,
+						timeRange,
+						hostMetricsAllowlist,
+						hostMetricsDelaySeconds,
+						config.httpStatusGroup,
+						config.packedMetricStorage,
+					);
 					for (const zoneId of chunkIds) delete zoneRetryAfter[zoneId];
 					chunkResults.push(metrics);
 				} catch (error) {
@@ -948,64 +736,6 @@ export class MetricExporter extends DurableObject<Env> {
 			if (chunkResults.length === 0 && firstChunkError !== undefined) {
 				throw longestRetryError ?? firstChunkError;
 			}
-			if (packedRequestMethod) {
-				const packed = await this.buildPackedRequestMethodState(
-					state,
-					requestMethodRows,
-					ingestId,
-					failedScopes,
-				);
-				return {
-					metrics: [],
-					packedMetricState: packed.state,
-					packedCounters: packed.counters,
-					partialErrors,
-					failedScopes,
-					zoneRetryAfter,
-				};
-			}
-			if (packedAdaptive) {
-				const packed = await this.buildPackedAdaptiveState(
-					state,
-					adaptiveRows,
-					ingestId,
-					failedScopes,
-				);
-				return {
-					metrics: [],
-					packedMetricState: packed.state,
-					packedCounters: packed.counters,
-					partialErrors,
-					failedScopes,
-					zoneRetryAfter,
-				};
-			}
-			if (packedCacheMiss) {
-				return {
-					metrics: [],
-					packedMetricState: this.buildPackedCacheMissState(
-						state,
-						cacheMissRows,
-						ingestId,
-					),
-					partialErrors,
-					failedScopes,
-					zoneRetryAfter,
-				};
-			}
-			if (packedLogpushZone) {
-				return {
-					metrics: [],
-					packedMetricState: this.buildPackedLogpushZoneState(
-						state,
-						logpushZoneRows,
-						ingestId,
-					),
-					partialErrors,
-					failedScopes,
-					zoneRetryAfter,
-				};
-			}
 			return {
 				metrics: mergeMetricDefinitions(...chunkResults),
 				partialErrors,
@@ -1035,86 +765,30 @@ export class MetricExporter extends DurableObject<Env> {
 	private async fetchZoneScopedMetrics(
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
-		ingestId: number,
-		config: ResolvedConfig,
-	): Promise<MetricFetchResult> {
+	): Promise<MetricDefinition[]> {
 		const { queryName, zoneMetadata } = state;
 
 		if (zoneMetadata === null) {
-			return {
-				metrics: [],
-				partialErrors: [],
-				failedScopes: new Set(),
-				zoneRetryAfter: {},
-			};
-		}
-
-		if (
-			queryName === SSL_CERTIFICATES_QUERY_NAME &&
-			packedMetricStorageEnabled(queryName, config)
-		) {
-			return {
-				metrics: [],
-				packedMetricState: this.buildPackedSSLCertificateState(
-					state,
-					await client.getPackedSSLCertificateZone(zoneMetadata),
-					ingestId,
-				),
-				partialErrors: [],
-				failedScopes: new Set(),
-				zoneRetryAfter: {},
-			};
-		}
-
-		if (
-			queryName === LB_WEIGHT_METRICS_QUERY_NAME &&
-			packedMetricStorageEnabled(queryName, config)
-		) {
-			return {
-				metrics: [],
-				packedMetricState: this.buildPackedLbWeightState(
-					state,
-					await client.getPackedLbWeightZone(zoneMetadata),
-					ingestId,
-				),
-				partialErrors: [],
-				failedScopes: new Set(),
-				zoneRetryAfter: {},
-			};
+			return [];
 		}
 
 		switch (queryName) {
 			case "ssl-certificates":
-				return {
-					metrics: await client.getSSLCertificateMetricsForZone(zoneMetadata),
-					partialErrors: [],
-					failedScopes: new Set(),
-					zoneRetryAfter: {},
-				};
+				return client.getSSLCertificateMetricsForZone(zoneMetadata);
 			case "lb-weight-metrics":
-				return {
-					metrics: await client.getLbWeightMetricsForZone(zoneMetadata),
-					partialErrors: [],
-					failedScopes: new Set(),
-					zoneRetryAfter: {},
-				};
+				return client.getLbWeightMetricsForZone(zoneMetadata);
 			default:
 				console.error("Unknown zone-scoped query", { queryName });
-				return {
-					metrics: [],
-					partialErrors: [],
-					failedScopes: new Set(),
-					zoneRetryAfter: {},
-				};
+				return [];
 		}
 	}
 
-	private async loadPackedMetricState(
-		queryName: PackedMetricQuery,
-	): Promise<PackedMetricState | undefined> {
+	private async loadPackedMetricState(): Promise<
+		PackedMetricState | undefined
+	> {
 		return loadChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			packedMetricStateKey(queryName),
+			PACKED_METRIC_STATE_KEY,
 			PackedMetricStateSchema,
 		);
 	}
@@ -1122,198 +796,28 @@ export class MetricExporter extends DurableObject<Env> {
 	private async savePackedMetricState(
 		metrics: MetricDefinition[],
 		state: MetricExporterState,
-		queryName: MetricDefinitionPackedQuery,
+		queryName: PackedMetricQuery,
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
-	): Promise<void> {
-		const previous = await this.loadPackedMetricState(queryName);
+	): Promise<Record<string, CounterState>> {
+		const previous = await this.loadPackedMetricState();
+		const packed = accumulatePackedMetricStateWithCounters({
+			queryName,
+			accountId: state.accountId,
+			accountName: state.accountName,
+			previous,
+			metrics,
+			counters: state.counters,
+			lastIngest: state.lastIngest,
+			ingestId,
+			failedScopes,
+		});
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
-			packedMetricStateKey(queryName),
-			accumulatePackedMetricState({
-				queryName,
-				accountId: state.accountId,
-				accountName: state.accountName,
-				previous,
-				metrics,
-				ingestId,
-				failedScopes,
-			}),
+			PACKED_METRIC_STATE_KEY,
+			packed.state,
 		);
-	}
-
-	private async savePackedMetricSnapshot(
-		state: PackedMetricState,
-	): Promise<void> {
-		await saveChunkedValue(
-			chunkedDurableObjectStorage(this.ctx.storage),
-			packedMetricStateKey(state.queryName),
-			state,
-		);
-	}
-
-	private async buildPackedRequestMethodState(
-		state: MetricExporterState,
-		zones: readonly RequestMethodZone[],
-		ingestId: number,
-		failedScopes: ReadonlySet<string>,
-	): Promise<{
-		state: PackedRequestMethodMetricState;
-		counters: Record<string, CounterState>;
-	}> {
-		const previousPacked = await this.loadPackedMetricState(
-			REQUEST_METHOD_METRICS_QUERY_NAME,
-		);
-		const observations: CounterObservation[] = zones.flatMap((zone) =>
-			zone.rows.map((row) => ({
-				metricName: REQUEST_METHOD_METRIC_NAME,
-				labels: {
-					zone: zone.zone,
-					method: row.method,
-				},
-				value: row.count,
-			})),
-		);
-		const accumulated = accumulateCounterObservations(
-			observations,
-			previousPacked?.queryName === REQUEST_METHOD_METRICS_QUERY_NAME
-				? state.counters
-				: {},
-			{
-				ingestId,
-				ageMissingCounters: state.lastIngest !== ingestId,
-				failedScopes,
-			},
-		);
-		return {
-			state: {
-				format: "request-method-packed-by-zone-v1",
-				accountId: state.accountId,
-				accountName: state.accountName,
-				queryName: REQUEST_METHOD_METRICS_QUERY_NAME,
-				lastFetch: Date.now(),
-				lastIngest: ingestId,
-				zones: buildPackedRequestMethodZones(accumulated.observations),
-			},
-			counters: accumulated.counters,
-		};
-	}
-
-	private async buildPackedAdaptiveState(
-		state: MetricExporterState,
-		zones: readonly AdaptiveZone[],
-		ingestId: number,
-		failedScopes: ReadonlySet<string>,
-	): Promise<{
-		state: PackedAdaptiveMetricState;
-		counters: Record<string, CounterState>;
-	}> {
-		const previousPacked = await this.loadPackedMetricState(
-			ADAPTIVE_METRICS_QUERY_NAME,
-		);
-		const accumulated = accumulateCounterObservations(
-			adaptiveCounterObservations(zones),
-			previousPacked?.queryName === ADAPTIVE_METRICS_QUERY_NAME
-				? state.counters
-				: {},
-			{
-				ingestId,
-				ageMissingCounters: state.lastIngest !== ingestId,
-				failedScopes,
-			},
-		);
-		return {
-			state: {
-				format: "adaptive-packed-by-zone-v1",
-				accountId: state.accountId,
-				accountName: state.accountName,
-				queryName: ADAPTIVE_METRICS_QUERY_NAME,
-				lastFetch: Date.now(),
-				lastIngest: ingestId,
-				zones: buildPackedAdaptiveZones(accumulated.observations, zones),
-			},
-			counters: accumulated.counters,
-		};
-	}
-
-	private buildPackedCacheMissState(
-		state: MetricExporterState,
-		zones: readonly CacheMissZone[],
-		ingestId: number,
-	): PackedCacheMissMetricState {
-		return {
-			format: "cache-miss-packed-by-zone-v1",
-			accountId: state.accountId,
-			accountName: state.accountName,
-			queryName: CACHE_MISS_METRICS_QUERY_NAME,
-			lastFetch: Date.now(),
-			lastIngest: ingestId,
-			zones: zones.map((zone) => ({
-				zone: zone.zone,
-				rows: zone.rows.map((row) => ({ ...row })),
-			})),
-		};
-	}
-
-	private buildPackedLogpushZoneState(
-		state: MetricExporterState,
-		zones: readonly LogpushZone[],
-		ingestId: number,
-	): PackedLogpushZoneMetricState {
-		return {
-			format: "logpush-zone-packed-by-zone-v1",
-			accountId: state.accountId,
-			accountName: state.accountName,
-			queryName: LOGPUSH_ZONE_METRICS_QUERY_NAME,
-			lastFetch: Date.now(),
-			lastIngest: ingestId,
-			zones: zones.map((zone) => ({
-				zone: zone.zone,
-				rows: zone.rows.map((row) => ({ ...row })),
-			})),
-		};
-	}
-
-	private buildPackedSSLCertificateState(
-		state: MetricExporterState,
-		zone: SSLCertificateZone,
-		ingestId: number,
-	): PackedSSLCertificateMetricState {
-		return {
-			format: "ssl-certificates-packed-by-zone-v1",
-			accountId: state.accountId,
-			accountName: state.accountName,
-			queryName: SSL_CERTIFICATES_QUERY_NAME,
-			lastFetch: Date.now(),
-			lastIngest: ingestId,
-			zones: [
-				{
-					zone: zone.zone,
-					rows: zone.rows.map((row) => ({ ...row })),
-				},
-			],
-		};
-	}
-
-	private buildPackedLbWeightState(
-		state: MetricExporterState,
-		zone: LbWeightZone,
-		ingestId: number,
-	): PackedLbWeightMetricState {
-		return {
-			format: "lb-weight-packed-by-zone-v1",
-			accountId: state.accountId,
-			accountName: state.accountName,
-			queryName: LB_WEIGHT_METRICS_QUERY_NAME,
-			lastFetch: Date.now(),
-			lastIngest: ingestId,
-			zones: [
-				{
-					zone: zone.zone,
-					rows: zone.rows.map((row) => ({ ...row })),
-				},
-			],
-		};
+		return packed.counters;
 	}
 
 	/** Persist state in bounded storage chunks before publishing it in memory. */
@@ -1340,6 +844,6 @@ export class MetricExporter extends DurableObject<Env> {
 		if (!isPackedMetricQuery(state.queryName)) {
 			return undefined;
 		}
-		return this.loadPackedMetricState(state.queryName);
+		return this.loadPackedMetricState();
 	}
 }

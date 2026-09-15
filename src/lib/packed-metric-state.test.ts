@@ -56,7 +56,7 @@ const originStatusMetrics: MetricDefinition[] = [
 ];
 
 describe("packed metric state facade", () => {
-	it("registers every packed query with its own storage key", () => {
+	it("registers every packed query with the existing colo storage key", () => {
 		expect(PACKED_METRIC_QUERIES).toEqual([
 			"adaptive-metrics",
 			"cache-miss-metrics",
@@ -77,32 +77,9 @@ describe("packed metric state facade", () => {
 		expect(isPackedMetricQuery("request-method-metrics")).toBe(true);
 		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(true);
 		expect(isPackedMetricQuery("ssl-certificates")).toBe(true);
-		expect(packedMetricStateKey("adaptive-metrics")).toBe(
-			"packed-adaptive-metrics",
-		);
-		expect(packedMetricStateKey("cache-miss-metrics")).toBe(
-			"packed-cache-miss-metrics",
-		);
-		expect(packedMetricStateKey("colo-error-metrics")).toBe(
-			"packed-colo-error-metrics",
-		);
-		// Colo keeps its shipped key so deployed DOs keep their accumulated state.
-		expect(packedMetricStateKey("colo-metrics")).toBe("packed-colo-metrics");
-		expect(packedMetricStateKey("lb-weight-metrics")).toBe(
-			"packed-lb-weight-metrics",
-		);
-		expect(packedMetricStateKey("logpush-zone")).toBe(
-			"packed-logpush-zone-metrics",
-		);
-		expect(packedMetricStateKey("origin-status-metrics")).toBe(
-			"packed-origin-status-metrics",
-		);
-		expect(packedMetricStateKey("request-method-metrics")).toBe(
-			"packed-request-method-metrics",
-		);
-		expect(packedMetricStateKey("ssl-certificates")).toBe(
-			"packed-ssl-certificates",
-		);
+		for (const query of PACKED_METRIC_QUERIES) {
+			expect(packedMetricStateKey(query)).toBe("packed-colo-metrics");
+		}
 	});
 
 	it("resolves the shared rollout flag for every packed query", () => {
@@ -231,7 +208,6 @@ describe("packed metric state facade", () => {
 							{
 								country: "US",
 								host: "a.example.com",
-								count: 1,
 								avgOriginDurationMs: 123,
 							},
 						],

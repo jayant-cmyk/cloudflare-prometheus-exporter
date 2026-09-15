@@ -510,6 +510,8 @@ export const LogpushAccountMetricsQuery = graphql(`
             jobId
             status
             destinationType
+            datetime
+            final
           }
         }
       }
@@ -541,7 +543,10 @@ export const LogpushZoneMetricsQuery = graphql(`
           count
           dimensions {
             jobId
+            status
             destinationType
+            datetime
+            final
           }
         }
       }

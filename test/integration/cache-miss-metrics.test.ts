@@ -118,11 +118,6 @@ describe("cache-miss-metrics Durable Object", () => {
 			);
 			expect(
 				zone.rows.every(
-					(row) => row.count === scenario.scale.trafficPerHost.count,
-				),
-			).toBe(true);
-			expect(
-				zone.rows.every(
 					(row) =>
 						row.avgOriginDurationMs ===
 						scenario.scale.trafficPerHost.avgOriginDurationMs,
