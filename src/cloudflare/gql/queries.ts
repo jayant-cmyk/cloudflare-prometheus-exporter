@@ -208,25 +208,34 @@ export const HealthCheckMetricsQuery = graphql(`
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
         zoneTag
-        healthCheckEventsAdaptiveGroups(
-          limit: $limit
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-        ) {
-          count
-          avg {
-            rttMs
-            timeToFirstByteMs
-            tcpConnMs
-            tlsHandshakeMs
-          }
-          dimensions {
-            healthStatus
+		healthEvents: healthCheckEventsAdaptiveGroups(
+			limit: $limit
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+		) {
+			count
+			dimensions {
+				healthStatus
             originIP
             region
             fqdn
-            failureReason
-          }
-        }
+				failureReason
+			}
+		}
+		healthTimings: healthCheckEventsAdaptiveGroups(
+			limit: $limit
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+		) {
+			avg {
+				rttMs
+				timeToFirstByteMs
+				tcpConnMs
+				tlsHandshakeMs
+			}
+			dimensions {
+				originIP
+				fqdn
+			}
+		}
       }
     }
   }

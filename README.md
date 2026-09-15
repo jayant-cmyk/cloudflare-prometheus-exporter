@@ -56,7 +56,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `HEALTH_CHECK_CACHE_TTL_SECONDS` | 10 | Health check cache TTL |
 | `EXCLUDE_HOST` | false | Exclude host labels from metrics |
 | `CF_HTTP_STATUS_GROUP` | false | Group HTTP status codes (2xx, 4xx, etc.) |
-| `PACKED_METRIC_STORAGE` | false | Enable compact by-zone storage and chunked read output for packed queries (`adaptive-metrics`, `colo-metrics`, `colo-error-metrics`, `origin-status-metrics`, `request-method-metrics`, `cache-miss-metrics`, `logpush-zone`, `ssl-certificates`, `lb-weight-metrics`). Metric names and labels are unchanged. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
+| `PACKED_METRIC_STORAGE` | false | Enable compact by-zone storage and chunked read output for packed queries (`adaptive-metrics`, `cache-miss-metrics`, `colo-error-metrics`, `colo-metrics`, `edge-country-metrics`, `health-check-metrics`, `hostname-http-metrics`, `lb-weight-metrics`, `logpush-zone`, `origin-status-metrics`, `request-method-metrics`, `ssl-certificates`). Metric names and labels are unchanged. Accepts the deprecated name `COLO_METRICS_PACKED_STORAGE`. |
 | `DISABLE_UI` | false | Disable landing page (returns 404) |
 | `DISABLE_CONFIG_API` | false | Disable config API endpoints (returns 404) |
 | `METRICS_DENYLIST` | - | Comma-separated list of metrics to exclude |
@@ -157,7 +157,7 @@ Override configuration at runtime without redeployment. Overrides persist in KV 
 | `metricsDenylist` | string | Comma-separated metrics to exclude |
 | `excludeHost` | boolean | Exclude host labels |
 | `httpStatusGroup` | boolean | Group HTTP status codes |
-| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for `adaptive-metrics`, `colo-metrics`, `colo-error-metrics`, `origin-status-metrics`, `request-method-metrics`, `cache-miss-metrics`, `logpush-zone`, `ssl-certificates`, and `lb-weight-metrics` |
+| `packedMetricStorage` | boolean | Enable compact by-zone storage and chunked read output for supported high-cardinality queries, including edge-country, health-check, and hostname HTTP metrics |
 | `coloMetricsPackedStorage` | boolean | Deprecated alias for `packedMetricStorage` |
 | `hostMetricsAllowlist` | string | Comma-separated hostnames for hostname-level metrics |
 | `hostMetricsDelaySeconds` | number | Ingestion delay for hostname metrics (seconds) |
@@ -201,21 +201,24 @@ Packed queries and their storage keys:
 
 | Query | Storage key | Exported families |
 |-------|-------------|-------------------|
-| `adaptive-metrics` | `packed-adaptive-metrics` | 4xx counters, 5xx counters, origin duration gauges per `zone`/`status`/`country`/`host`, plus zone-level `origin_error_rate` |
+| `adaptive-metrics` | `packed-colo-metrics` | 4xx counters, 5xx counters, origin duration gauges per `zone`/`status`/`country`/`host`, plus zone-level `origin_error_rate` |
 | `colo-metrics` | `packed-colo-metrics` | visits, edge response bytes, requests per `zone`/`colo`/`host` |
-| `colo-error-metrics` | `packed-colo-error-metrics` | error visits, edge response bytes, requests per `zone`/`colo`/`host`/`status` |
-| `origin-status-metrics` | `packed-origin-status-metrics` | requests per `zone`/`origin_status`/`country`/`host` |
-| `request-method-metrics` | `packed-request-method-metrics` | requests per `zone`/`method` |
-| `cache-miss-metrics` | `packed-cache-miss-metrics` | average origin duration per `zone`/`country`/`host` |
-| `logpush-zone` | `packed-logpush-zone-metrics` | failed jobs per `zone`/`job_id`/`destination_type` |
-| `ssl-certificates` | `packed-ssl-certificates` | certificate expiry timestamps per `zone`/`type`/`issuer`/`status` |
-| `lb-weight-metrics` | `packed-lb-weight-metrics` | load balancer origin weights per `zone`/`lb_name`/`pool_name`/`origin_name` |
+| `colo-error-metrics` | `packed-colo-metrics` | error visits, edge response bytes, requests per `zone`/`colo`/`host`/`status` |
+| `edge-country-metrics` | `packed-colo-metrics` | requests per `zone`/`edge_status`/`country`/`host`, plus zone-level edge error rate |
+| `health-check-metrics` | `packed-colo-metrics` | health events per detailed origin labels, event average, and timing gauges per `zone`/`origin_ip`/`fqdn` |
+| `hostname-http-metrics` | `packed-colo-metrics` | hostname request, status, cache, average latency, p50, and p95 gauges |
+| `origin-status-metrics` | `packed-colo-metrics` | requests per `zone`/`origin_status`/`country`/`host` |
+| `request-method-metrics` | `packed-colo-metrics` | requests per `zone`/`method` |
+| `cache-miss-metrics` | `packed-colo-metrics` | average origin duration per `zone`/`country`/`host` |
+| `logpush-zone` | `packed-colo-metrics` | failed jobs per `zone`/`job_id`/`destination_type` |
+| `ssl-certificates` | `packed-colo-metrics` | certificate expiry timestamps per `zone`/`type`/`issuer`/`status` |
+| `lb-weight-metrics` | `packed-colo-metrics` | load balancer origin weights per `zone`/`lb_name`/`pool_name`/`origin_name` |
 
 - Toggling the flag in either direction **resets the counters of every packed query** (Prometheus `rate()`/`increase()` handle counter resets). Disabling deletes the packed snapshots on the next refresh, so re-enabling starts from zero rather than reviving old totals. The affected metrics are absent until the first successful refresh in the new mode.
 - The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked output for the same metric family.
 - A row is observed as a unit: all counters of a row share one retry checkpoint, and a counter Cloudflare omits for an observed row is recorded as `0`. Rows not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
 - When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.
-- `adaptive-metrics`, `origin-status-metrics`, `request-method-metrics`, `cache-miss-metrics`, and `colo-error-metrics` keep their existing metric families. `colo-metrics` uses its reduced packed query, and `logpush-zone` drops the unexported `datetime`, `final`, and `status` dimensions from the packed read path.
+- Packed queries keep their existing metric families. `colo-metrics` uses its reduced packed query, health checks use separate event and timing aliases, and hostname metrics preserve their four aliases and fixed one-minute window.
 - The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. At ~55 bytes per unique row, 150,000 rows (450,000 samples) use ~8 MiB; the ceiling is roughly 280,000 rows with typical hostnames.
 
 ## Available Metrics

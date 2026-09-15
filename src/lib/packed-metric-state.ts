@@ -28,6 +28,21 @@ import {
 	PackedColoMetricStateSchema,
 } from "./packed-colo-state";
 import {
+	accumulatePackedEdgeCountryRows,
+	EDGE_COUNTRY_METRICS_QUERY_NAME,
+	PackedEdgeCountryMetricStateSchema,
+} from "./packed-edge-country";
+import {
+	accumulatePackedHealthCheckRows,
+	HEALTH_CHECK_METRICS_QUERY_NAME,
+	PackedHealthCheckMetricStateSchema,
+} from "./packed-health-check";
+import {
+	buildPackedHostnameHttpZones,
+	HOSTNAME_HTTP_METRICS_QUERY_NAME,
+	PackedHostnameHttpMetricStateSchema,
+} from "./packed-hostname-http";
+import {
 	LB_WEIGHT_METRIC_NAME,
 	LB_WEIGHT_METRICS_QUERY_NAME,
 	type LbWeightZone,
@@ -67,6 +82,9 @@ export const PACKED_METRIC_QUERIES = [
 	CACHE_MISS_METRICS_QUERY_NAME,
 	COLO_ERROR_METRICS_QUERY_NAME,
 	COLO_METRICS_QUERY_NAME,
+	EDGE_COUNTRY_METRICS_QUERY_NAME,
+	HEALTH_CHECK_METRICS_QUERY_NAME,
+	HOSTNAME_HTTP_METRICS_QUERY_NAME,
 	LB_WEIGHT_METRICS_QUERY_NAME,
 	LOGPUSH_ZONE_METRICS_QUERY_NAME,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
@@ -84,6 +102,9 @@ export const PackedMetricStateSchema = z.discriminatedUnion("queryName", [
 	PackedCacheMissMetricStateSchema,
 	PackedColoErrorMetricStateSchema,
 	PackedColoMetricStateSchema,
+	PackedEdgeCountryMetricStateSchema,
+	PackedHealthCheckMetricStateSchema,
+	PackedHostnameHttpMetricStateSchema,
 	PackedLbWeightMetricStateSchema,
 	PackedLogpushZoneMetricStateSchema,
 	PackedOriginStatusMetricStateSchema,
@@ -123,6 +144,26 @@ export function packedMetricScopes(state: PackedMetricState): string[] {
 		case SSL_CERTIFICATES_QUERY_NAME:
 			return state.zones
 				.filter((zone) => zone.rows.length > 0)
+				.map((zone) => zone.zone);
+		case EDGE_COUNTRY_METRICS_QUERY_NAME:
+			return state.zones
+				.filter((zone) => zone.edgeStatus.length > 0)
+				.map((zone) => zone.zone);
+		case HEALTH_CHECK_METRICS_QUERY_NAME:
+			return state.zones
+				.filter(
+					(zone) => zone.eventRows.length > 0 || zone.timingRows.length > 0,
+				)
+				.map((zone) => zone.zone);
+		case HOSTNAME_HTTP_METRICS_QUERY_NAME:
+			return state.zones
+				.filter(
+					(zone) =>
+						zone.requestRows.length > 0 ||
+						zone.statusRows.length > 0 ||
+						zone.cacheRows.length > 0 ||
+						zone.latencyRows.length > 0,
+				)
 				.map((zone) => zone.zone);
 		default:
 			return state.zones
@@ -477,6 +518,56 @@ export function accumulatePackedMetricStateWithCounters(
 							: undefined,
 						input.metrics,
 						input.ingestId,
+						input.failedScopes,
+					),
+				},
+				counters: noCounters,
+			};
+		case EDGE_COUNTRY_METRICS_QUERY_NAME:
+			return {
+				state: {
+					...envelope,
+					format: "edge-country-packed-by-zone-v1",
+					queryName: EDGE_COUNTRY_METRICS_QUERY_NAME,
+					zones: accumulatePackedEdgeCountryRows(
+						input.previous?.queryName === EDGE_COUNTRY_METRICS_QUERY_NAME
+							? input.previous
+							: undefined,
+						input.metrics,
+						input.ingestId,
+						input.failedScopes,
+					),
+				},
+				counters: noCounters,
+			};
+		case HEALTH_CHECK_METRICS_QUERY_NAME:
+			return {
+				state: {
+					...envelope,
+					format: "health-check-packed-by-zone-v1",
+					queryName: HEALTH_CHECK_METRICS_QUERY_NAME,
+					zones: accumulatePackedHealthCheckRows(
+						input.previous?.queryName === HEALTH_CHECK_METRICS_QUERY_NAME
+							? input.previous
+							: undefined,
+						input.metrics,
+						input.ingestId,
+						input.failedScopes,
+					),
+				},
+				counters: noCounters,
+			};
+		case HOSTNAME_HTTP_METRICS_QUERY_NAME:
+			return {
+				state: {
+					...envelope,
+					format: "hostname-http-packed-by-zone-v1",
+					queryName: HOSTNAME_HTTP_METRICS_QUERY_NAME,
+					zones: buildPackedHostnameHttpZones(
+						input.previous?.queryName === HOSTNAME_HTTP_METRICS_QUERY_NAME
+							? input.previous
+							: undefined,
+						input.metrics,
 						input.failedScopes,
 					),
 				},

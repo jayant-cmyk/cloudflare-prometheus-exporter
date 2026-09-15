@@ -2482,9 +2482,8 @@ export class CloudflareMetricsClient {
 			let totalEvents = 0;
 			let groupCount = 0;
 
-			for (const group of zoneData.healthCheckEventsAdaptiveGroups ?? []) {
+			for (const group of zoneData.healthEvents ?? []) {
 				const dim = group.dimensions;
-				const avg = group.avg;
 
 				if (group.count != null && group.count > 0) {
 					eventsOrigin.values.push({
@@ -2500,42 +2499,39 @@ export class CloudflareMetricsClient {
 					});
 					totalEvents += group.count;
 					groupCount++;
+				}
+			}
 
-					// Timing metrics
-					const baseLabels = {
-						zone: zoneName,
-						origin_ip: dim?.originIP ?? "",
-						fqdn: dim?.fqdn ?? "",
-					};
-
-					if (avg?.rttMs != null) {
-						// Convert milliseconds to seconds
-						healthCheckRtt.values.push({
-							labels: baseLabels,
-							value: avg.rttMs / 1000,
-						});
-					}
-					if (avg?.timeToFirstByteMs != null) {
-						// Convert milliseconds to seconds
-						healthCheckTtfb.values.push({
-							labels: baseLabels,
-							value: avg.timeToFirstByteMs / 1000,
-						});
-					}
-					if (avg?.tcpConnMs != null) {
-						// Convert milliseconds to seconds
-						healthCheckTcpConn.values.push({
-							labels: baseLabels,
-							value: avg.tcpConnMs / 1000,
-						});
-					}
-					if (avg?.tlsHandshakeMs != null) {
-						// Convert milliseconds to seconds
-						healthCheckTlsHandshake.values.push({
-							labels: baseLabels,
-							value: avg.tlsHandshakeMs / 1000,
-						});
-					}
+			for (const group of zoneData.healthTimings ?? []) {
+				const avg = group.avg;
+				const baseLabels = {
+					zone: zoneName,
+					origin_ip: group.dimensions?.originIP ?? "",
+					fqdn: group.dimensions?.fqdn ?? "",
+				};
+				if (avg?.rttMs != null) {
+					healthCheckRtt.values.push({
+						labels: baseLabels,
+						value: avg.rttMs / 1000,
+					});
+				}
+				if (avg?.timeToFirstByteMs != null) {
+					healthCheckTtfb.values.push({
+						labels: baseLabels,
+						value: avg.timeToFirstByteMs / 1000,
+					});
+				}
+				if (avg?.tcpConnMs != null) {
+					healthCheckTcpConn.values.push({
+						labels: baseLabels,
+						value: avg.tcpConnMs / 1000,
+					});
+				}
+				if (avg?.tlsHandshakeMs != null) {
+					healthCheckTlsHandshake.values.push({
+						labels: baseLabels,
+						value: avg.tlsHandshakeMs / 1000,
+					});
 				}
 			}
 

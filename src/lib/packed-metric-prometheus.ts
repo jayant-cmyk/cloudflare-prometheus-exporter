@@ -18,6 +18,21 @@ import {
 	COLO_METRICS_QUERY_NAME,
 	type PackedColoMetricState,
 } from "./packed-colo-state";
+import {
+	EDGE_COUNTRY_METRICS_QUERY_NAME,
+	type PackedEdgeCountryMetricState,
+	serializePackedEdgeCountryMetrics,
+} from "./packed-edge-country";
+import {
+	HEALTH_CHECK_METRICS_QUERY_NAME,
+	type PackedHealthCheckMetricState,
+	serializePackedHealthCheckMetrics,
+} from "./packed-health-check";
+import {
+	HOSTNAME_HTTP_METRICS_QUERY_NAME,
+	type PackedHostnameHttpMetricState,
+	serializePackedHostnameHttpMetrics,
+} from "./packed-hostname-http";
 import { serializePackedLbWeightMetrics } from "./packed-lb-weight-prometheus";
 import {
 	LB_WEIGHT_METRICS_QUERY_NAME,
@@ -59,6 +74,9 @@ export function* serializePackedMetrics(
 	const coloStates: PackedColoMetricState[] = [];
 	const cacheMissStates: PackedCacheMissMetricState[] = [];
 	const coloErrorStates: PackedColoErrorMetricState[] = [];
+	const edgeCountryStates: PackedEdgeCountryMetricState[] = [];
+	const healthCheckStates: PackedHealthCheckMetricState[] = [];
+	const hostnameHttpStates: PackedHostnameHttpMetricState[] = [];
 	const lbWeightStates: PackedLbWeightMetricState[] = [];
 	const logpushZoneStates: PackedLogpushZoneMetricState[] = [];
 	const originStatusStates: PackedOriginStatusMetricState[] = [];
@@ -77,6 +95,15 @@ export function* serializePackedMetrics(
 				break;
 			case COLO_METRICS_QUERY_NAME:
 				coloStates.push(state);
+				break;
+			case EDGE_COUNTRY_METRICS_QUERY_NAME:
+				edgeCountryStates.push(state);
+				break;
+			case HEALTH_CHECK_METRICS_QUERY_NAME:
+				healthCheckStates.push(state);
+				break;
+			case HOSTNAME_HTTP_METRICS_QUERY_NAME:
+				hostnameHttpStates.push(state);
 				break;
 			case LB_WEIGHT_METRICS_QUERY_NAME:
 				lbWeightStates.push(state);
@@ -100,6 +127,9 @@ export function* serializePackedMetrics(
 	yield* serializePackedCacheMissMetrics(cacheMissStates, options);
 	yield* serializePackedColoErrorMetrics(coloErrorStates, options);
 	yield* serializePackedColoMetrics(coloStates, options);
+	yield* serializePackedEdgeCountryMetrics(edgeCountryStates, options);
+	yield* serializePackedHealthCheckMetrics(healthCheckStates, options);
+	yield* serializePackedHostnameHttpMetrics(hostnameHttpStates, options);
 	yield* serializePackedLbWeightMetrics(lbWeightStates, options);
 	yield* serializePackedLogpushZoneMetrics(logpushZoneStates, options);
 	yield* serializePackedOriginStatusMetrics(originStatusStates, options);
