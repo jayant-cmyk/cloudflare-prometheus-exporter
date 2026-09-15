@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { getCloudflareMetricsClient } from "../cloudflare/client";
 import { MetricExporter } from "./MetricExporter";
 
 class AlarmStorage {
@@ -854,5 +855,214 @@ describe("MetricExporter packed cache miss storage", () => {
 				],
 			},
 		]);
+	});
+});
+
+describe("MetricExporter additional packed storage", () => {
+	it("stores logpush zone snapshots without generic metrics", async () => {
+		const storage = new AlarmStorage();
+		const zone = {
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		};
+		storage.values.set("state", {
+			...storedState(),
+			queryName: "logpush-zone",
+			zones: [zone],
+		});
+		let packed = false;
+		vi.stubGlobal(
+			"fetch",
+			async () =>
+				new Response(
+					JSON.stringify({
+						data: {
+							viewer: {
+								zones: [
+									{
+										zoneTag: zone.id,
+										logpushHealthAdaptiveGroups: [
+											{
+												dimensions: {
+													jobId: 23,
+													destinationType: "s3",
+												},
+												count: 4,
+											},
+										],
+									},
+								],
+							},
+						},
+					}),
+					{ headers: { "content-type": "application/json" } },
+				),
+		);
+		const env = {
+			CLOUDFLARE_API_TOKEN: "test-token",
+			CONFIG_KV: {
+				get: async () => JSON.stringify({ packedMetricStorage: packed }),
+			},
+			CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+		};
+		const { exporter, ready } = createExporter(storage, env);
+		await ready;
+
+		packed = true;
+		await exporter.triggerRefresh({
+			mintime: new Date(1735689600000).toISOString(),
+			maxtime: new Date(1735689660000).toISOString(),
+		});
+
+		const snapshot = await exporter.exportPackedMetrics();
+		if (snapshot !== undefined && snapshot.queryName !== "logpush-zone") {
+			throw new Error("expected a packed logpush zone snapshot");
+		}
+		expect(snapshot?.zones).toEqual([
+			{
+				zone: "example.com",
+				rows: [{ jobId: "23", destinationType: "s3", count: 4 }],
+			},
+		]);
+		expect(await exporter.export()).toEqual([]);
+	});
+
+	it("stores ssl certificate snapshots from zone exporters", async () => {
+		const storage = new AlarmStorage();
+		const zone = {
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		};
+		storage.values.set("state", {
+			...storedState(),
+			scopeType: "zone",
+			scopeId: zone.id,
+			queryName: "ssl-certificates",
+			zoneMetadata: zone,
+		});
+		const rateLimiter = { limit: async () => ({ success: true }) };
+		const env = {
+			CLOUDFLARE_API_TOKEN: "test-token",
+			CONFIG_KV: {
+				get: async () => JSON.stringify({ packedMetricStorage: true }),
+			},
+			CF_API_RATE_LIMITER: rateLimiter,
+		};
+		const client = getCloudflareMetricsClient({
+			LOG_FORMAT: "json",
+			LOG_LEVEL: "error",
+			...env,
+		} as unknown as Env);
+		vi.spyOn(client, "getPackedSSLCertificateZone").mockResolvedValue({
+			zone: zone.name,
+			rows: [
+				{
+					type: "advanced",
+					issuer: "letsencrypt",
+					status: "active",
+					expiresOnSeconds: 1_735_689_600,
+				},
+			],
+		});
+		const { exporter, ready } = createExporter(storage, env);
+		await ready;
+
+		await exporter.triggerRefresh({
+			mintime: new Date(1735689600000).toISOString(),
+			maxtime: new Date(1735689660000).toISOString(),
+		});
+
+		const snapshot = await exporter.exportPackedMetrics();
+		if (snapshot !== undefined && snapshot.queryName !== "ssl-certificates") {
+			throw new Error("expected a packed ssl certificates snapshot");
+		}
+		expect(snapshot?.zones).toEqual([
+			{
+				zone: "example.com",
+				rows: [
+					{
+						type: "advanced",
+						issuer: "letsencrypt",
+						status: "active",
+						expiresOnSeconds: 1_735_689_600,
+					},
+				],
+			},
+		]);
+		expect(await exporter.export()).toEqual([]);
+	});
+
+	it("stores load balancer weight snapshots from zone exporters", async () => {
+		const storage = new AlarmStorage();
+		const zone = {
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		};
+		storage.values.set("state", {
+			...storedState(),
+			scopeType: "zone",
+			scopeId: zone.id,
+			queryName: "lb-weight-metrics",
+			zoneMetadata: zone,
+		});
+		const rateLimiter = { limit: async () => ({ success: true }) };
+		const env = {
+			CLOUDFLARE_API_TOKEN: "test-token",
+			CONFIG_KV: {
+				get: async () => JSON.stringify({ packedMetricStorage: true }),
+			},
+			CF_API_RATE_LIMITER: rateLimiter,
+		};
+		const client = getCloudflareMetricsClient({
+			LOG_FORMAT: "json",
+			LOG_LEVEL: "error",
+			...env,
+		} as unknown as Env);
+		vi.spyOn(client, "getPackedLbWeightZone").mockResolvedValue({
+			zone: zone.name,
+			rows: [
+				{
+					lbName: "public",
+					poolName: "primary",
+					originName: "app-1",
+					weight: 0.75,
+				},
+			],
+		});
+		const { exporter, ready } = createExporter(storage, env);
+		await ready;
+
+		await exporter.triggerRefresh({
+			mintime: new Date(1735689600000).toISOString(),
+			maxtime: new Date(1735689660000).toISOString(),
+		});
+
+		const snapshot = await exporter.exportPackedMetrics();
+		if (snapshot !== undefined && snapshot.queryName !== "lb-weight-metrics") {
+			throw new Error("expected a packed lb weight snapshot");
+		}
+		expect(snapshot?.zones).toEqual([
+			{
+				zone: "example.com",
+				rows: [
+					{
+						lbName: "public",
+						poolName: "primary",
+						originName: "app-1",
+						weight: 0.75,
+					},
+				],
+			},
+		]);
+		expect(await exporter.export()).toEqual([]);
 	});
 });

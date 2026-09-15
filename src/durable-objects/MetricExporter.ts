@@ -32,6 +32,16 @@ import {
 	type PackedCacheMissMetricState,
 } from "../lib/packed-cache-miss-state";
 import {
+	LB_WEIGHT_METRICS_QUERY_NAME,
+	type LbWeightZone,
+	type PackedLbWeightMetricState,
+} from "../lib/packed-lb-weight-state";
+import {
+	LOGPUSH_ZONE_METRICS_QUERY_NAME,
+	type LogpushZone,
+	type PackedLogpushZoneMetricState,
+} from "../lib/packed-logpush-zone-state";
+import {
 	accumulatePackedMetricState,
 	isMetricDefinitionPackedQuery,
 	isPackedMetricQuery,
@@ -49,6 +59,11 @@ import {
 	REQUEST_METHOD_METRICS_QUERY_NAME,
 	type RequestMethodZone,
 } from "../lib/packed-request-method-state";
+import {
+	type PackedSSLCertificateMetricState,
+	SSL_CERTIFICATES_QUERY_NAME,
+	type SSLCertificateZone,
+} from "../lib/packed-ssl-certificates-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -424,16 +439,15 @@ export class MetricExporter extends DurableObject<Env> {
 					logger,
 				);
 			} else {
-				result = {
-					metrics: await this.fetchZoneScopedMetrics(client, state),
-					partialErrors: [],
-					failedScopes: new Set(),
-					zoneRetryAfter: {},
-				};
+				result = await this.fetchZoneScopedMetrics(
+					client,
+					state,
+					ingestId,
+					config,
+				);
 			}
 
 			if (
-				state.scopeType === "account" &&
 				isPackedMetricQuery(state.queryName) &&
 				packedMetricStorageEnabled(state.queryName, config)
 			) {
@@ -446,6 +460,10 @@ export class MetricExporter extends DurableObject<Env> {
 						counters: result.packedCounters ?? {},
 						lastIngest: ingestId,
 						lastRefresh: Date.now(),
+						lastSslFetch:
+							state.scopeType === "zone"
+								? Date.now()
+								: currentState.lastSslFetch,
 						lastError: null,
 						zoneRetryAfter: result.zoneRetryAfter,
 					};
@@ -490,10 +508,7 @@ export class MetricExporter extends DurableObject<Env> {
 				return;
 			}
 
-			if (
-				state.scopeType === "account" &&
-				isPackedMetricQuery(state.queryName)
-			) {
+			if (isPackedMetricQuery(state.queryName)) {
 				// Packed storage is off: drop any packed snapshot so re-enabling the
 				// flag starts a fresh counter generation instead of reviving old totals.
 				const packedSnapshot = await this.loadPackedMetricState(
@@ -702,6 +717,9 @@ export class MetricExporter extends DurableObject<Env> {
 			const packedCacheMiss =
 				queryName === CACHE_MISS_METRICS_QUERY_NAME &&
 				packedMetricStorageEnabled(queryName, config);
+			const packedLogpushZone =
+				queryName === LOGPUSH_ZONE_METRICS_QUERY_NAME &&
+				packedMetricStorageEnabled(queryName, config);
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
@@ -731,6 +749,23 @@ export class MetricExporter extends DurableObject<Env> {
 						packedMetricState: this.buildPackedCacheMissState(
 							state,
 							await client.getPackedCacheMissZones(
+								zoneIds,
+								zonesToQuery,
+								timeRange,
+							),
+							ingestId,
+						),
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
+				if (packedLogpushZone) {
+					return {
+						metrics: [],
+						packedMetricState: this.buildPackedLogpushZoneState(
+							state,
+							await client.getPackedLogpushZoneRows(
 								zoneIds,
 								zonesToQuery,
 								timeRange,
@@ -787,13 +822,14 @@ export class MetricExporter extends DurableObject<Env> {
 			let longestRetrySeconds = config.metricRefreshIntervalSeconds;
 			const requestMethodRows: RequestMethodZone[] = [];
 			const cacheMissRows: CacheMissZone[] = [];
+			const logpushZoneRows: LogpushZone[] = [];
 			for (let i = 0; i < queryableZones.length; i += ZONES_PER_CHUNK) {
 				const chunkZones = queryableZones.slice(i, i + ZONES_PER_CHUNK);
 				const chunkIds = chunkZones.map((z) => z.id);
 
 				try {
 					const metrics =
-						packedRequestMethod || packedCacheMiss
+						packedRequestMethod || packedCacheMiss || packedLogpushZone
 							? []
 							: await client.getZoneMetrics(
 									queryName,
@@ -818,6 +854,15 @@ export class MetricExporter extends DurableObject<Env> {
 					if (packedCacheMiss) {
 						cacheMissRows.push(
 							...(await client.getPackedCacheMissZones(
+								chunkIds,
+								chunkZones,
+								timeRange,
+							)),
+						);
+					}
+					if (packedLogpushZone) {
+						logpushZoneRows.push(
+							...(await client.getPackedLogpushZoneRows(
 								chunkIds,
 								chunkZones,
 								timeRange,
@@ -888,6 +933,19 @@ export class MetricExporter extends DurableObject<Env> {
 					zoneRetryAfter,
 				};
 			}
+			if (packedLogpushZone) {
+				return {
+					metrics: [],
+					packedMetricState: this.buildPackedLogpushZoneState(
+						state,
+						logpushZoneRows,
+						ingestId,
+					),
+					partialErrors,
+					failedScopes,
+					zoneRetryAfter,
+				};
+			}
 			return {
 				metrics: mergeMetricDefinitions(...chunkResults),
 				partialErrors,
@@ -917,21 +975,77 @@ export class MetricExporter extends DurableObject<Env> {
 	private async fetchZoneScopedMetrics(
 		client: ReturnType<typeof getCloudflareMetricsClient>,
 		state: MetricExporterState,
-	): Promise<MetricDefinition[]> {
+		ingestId: number,
+		config: ResolvedConfig,
+	): Promise<MetricFetchResult> {
 		const { queryName, zoneMetadata } = state;
 
 		if (zoneMetadata === null) {
-			return [];
+			return {
+				metrics: [],
+				partialErrors: [],
+				failedScopes: new Set(),
+				zoneRetryAfter: {},
+			};
+		}
+
+		if (
+			queryName === SSL_CERTIFICATES_QUERY_NAME &&
+			packedMetricStorageEnabled(queryName, config)
+		) {
+			return {
+				metrics: [],
+				packedMetricState: this.buildPackedSSLCertificateState(
+					state,
+					await client.getPackedSSLCertificateZone(zoneMetadata),
+					ingestId,
+				),
+				partialErrors: [],
+				failedScopes: new Set(),
+				zoneRetryAfter: {},
+			};
+		}
+
+		if (
+			queryName === LB_WEIGHT_METRICS_QUERY_NAME &&
+			packedMetricStorageEnabled(queryName, config)
+		) {
+			return {
+				metrics: [],
+				packedMetricState: this.buildPackedLbWeightState(
+					state,
+					await client.getPackedLbWeightZone(zoneMetadata),
+					ingestId,
+				),
+				partialErrors: [],
+				failedScopes: new Set(),
+				zoneRetryAfter: {},
+			};
 		}
 
 		switch (queryName) {
 			case "ssl-certificates":
-				return client.getSSLCertificateMetricsForZone(zoneMetadata);
+				return {
+					metrics: await client.getSSLCertificateMetricsForZone(zoneMetadata),
+					partialErrors: [],
+					failedScopes: new Set(),
+					zoneRetryAfter: {},
+				};
 			case "lb-weight-metrics":
-				return client.getLbWeightMetricsForZone(zoneMetadata);
+				return {
+					metrics: await client.getLbWeightMetricsForZone(zoneMetadata),
+					partialErrors: [],
+					failedScopes: new Set(),
+					zoneRetryAfter: {},
+				};
 			default:
 				console.error("Unknown zone-scoped query", { queryName });
-				return [];
+				return {
+					metrics: [],
+					partialErrors: [],
+					failedScopes: new Set(),
+					zoneRetryAfter: {},
+				};
 		}
 	}
 
@@ -1044,6 +1158,67 @@ export class MetricExporter extends DurableObject<Env> {
 		};
 	}
 
+	private buildPackedLogpushZoneState(
+		state: MetricExporterState,
+		zones: readonly LogpushZone[],
+		ingestId: number,
+	): PackedLogpushZoneMetricState {
+		return {
+			format: "logpush-zone-packed-by-zone-v1",
+			accountId: state.accountId,
+			accountName: state.accountName,
+			queryName: LOGPUSH_ZONE_METRICS_QUERY_NAME,
+			lastFetch: Date.now(),
+			lastIngest: ingestId,
+			zones: zones.map((zone) => ({
+				zone: zone.zone,
+				rows: zone.rows.map((row) => ({ ...row })),
+			})),
+		};
+	}
+
+	private buildPackedSSLCertificateState(
+		state: MetricExporterState,
+		zone: SSLCertificateZone,
+		ingestId: number,
+	): PackedSSLCertificateMetricState {
+		return {
+			format: "ssl-certificates-packed-by-zone-v1",
+			accountId: state.accountId,
+			accountName: state.accountName,
+			queryName: SSL_CERTIFICATES_QUERY_NAME,
+			lastFetch: Date.now(),
+			lastIngest: ingestId,
+			zones: [
+				{
+					zone: zone.zone,
+					rows: zone.rows.map((row) => ({ ...row })),
+				},
+			],
+		};
+	}
+
+	private buildPackedLbWeightState(
+		state: MetricExporterState,
+		zone: LbWeightZone,
+		ingestId: number,
+	): PackedLbWeightMetricState {
+		return {
+			format: "lb-weight-packed-by-zone-v1",
+			accountId: state.accountId,
+			accountName: state.accountName,
+			queryName: LB_WEIGHT_METRICS_QUERY_NAME,
+			lastFetch: Date.now(),
+			lastIngest: ingestId,
+			zones: [
+				{
+					zone: zone.zone,
+					rows: zone.rows.map((row) => ({ ...row })),
+				},
+			],
+		};
+	}
+
 	/** Persist state in bounded storage chunks before publishing it in memory. */
 	private async saveState(state: MetricExporterState): Promise<void> {
 		await saveChunkedValue(
@@ -1065,10 +1240,7 @@ export class MetricExporter extends DurableObject<Env> {
 	/** Packed counters, or undefined until the first packed refresh has run. */
 	async exportPackedMetrics(): Promise<PackedMetricState | undefined> {
 		const state = this.getState();
-		if (
-			state.scopeType !== "account" ||
-			!isPackedMetricQuery(state.queryName)
-		) {
+		if (!isPackedMetricQuery(state.queryName)) {
 			return undefined;
 		}
 		return this.loadPackedMetricState(state.queryName);

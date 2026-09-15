@@ -370,13 +370,16 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 
 		const accountQueries = getActiveAccountQueries(config, isFreeTierAccount);
 		const enabledPackedMetricQueries = new Set(options.packedMetricQueries);
-		const packedMetricQueries = accountQueries.filter(
+		const packedAccountQueries = accountQueries.filter(
 			(query): query is PackedMetricQuery =>
 				isPackedMetricQuery(query) && enabledPackedMetricQueries.has(query),
 		);
+		const packedZoneQueries = ZONE_SCOPED_QUERIES.filter((query) =>
+			enabledPackedMetricQueries.has(query),
+		);
 		const packedMetricStates = (
-			await Promise.all(
-				packedMetricQueries.map(async (query) => {
+			await Promise.all([
+				...packedAccountQueries.map(async (query) => {
 					try {
 						const exporter = await MetricExporter.get(
 							`account:${state.accountId}:${query}`,
@@ -385,14 +388,36 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 						return await exporter.exportPackedMetrics();
 					} catch (error) {
 						const msg = error instanceof Error ? error.message : String(error);
-						logger.error("Failed to export account metrics", {
+						logger.error("Failed to export account packed metrics", {
 							query,
 							error: msg,
 						});
 						return undefined;
 					}
 				}),
-			)
+				...(isFreeTierAccount
+					? []
+					: state.zones.flatMap((zone) =>
+							packedZoneQueries.map(async (query) => {
+								try {
+									const exporter = await MetricExporter.get(
+										`zone:${zone.id}:${query}`,
+										this.env,
+									);
+									return await exporter.exportPackedMetrics();
+								} catch (error) {
+									const msg =
+										error instanceof Error ? error.message : String(error);
+									logger.error("Failed to export zone packed metrics", {
+										zone: zone.name,
+										query,
+										error: msg,
+									});
+									return undefined;
+								}
+							}),
+						)),
+			])
 		).filter((packedState) => packedState !== undefined);
 		const accountMetricQueries = accountQueries.filter(
 			(query) =>
@@ -424,7 +449,9 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			? []
 			: await Promise.all(
 					state.zones.flatMap((zone) =>
-						ZONE_SCOPED_QUERIES.map(async (query) => {
+						ZONE_SCOPED_QUERIES.filter(
+							(query) => !enabledPackedMetricQueries.has(query),
+						).map(async (query) => {
 							try {
 								const exporter = await MetricExporter.get(
 									`zone:${zone.id}:${query}`,

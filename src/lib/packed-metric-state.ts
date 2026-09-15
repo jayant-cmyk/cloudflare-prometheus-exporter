@@ -5,10 +5,23 @@ import {
 	PackedCacheMissMetricStateSchema,
 } from "./packed-cache-miss-state";
 import {
+	accumulatePackedColoErrorRows,
+	COLO_ERROR_METRICS_QUERY_NAME,
+	PackedColoErrorMetricStateSchema,
+} from "./packed-colo-error-state";
+import {
 	accumulatePackedColoRows,
 	COLO_METRICS_QUERY_NAME,
 	PackedColoMetricStateSchema,
 } from "./packed-colo-state";
+import {
+	LB_WEIGHT_METRICS_QUERY_NAME,
+	PackedLbWeightMetricStateSchema,
+} from "./packed-lb-weight-state";
+import {
+	LOGPUSH_ZONE_METRICS_QUERY_NAME,
+	PackedLogpushZoneMetricStateSchema,
+} from "./packed-logpush-zone-state";
 import {
 	accumulatePackedOriginStatusRows,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
@@ -18,17 +31,26 @@ import {
 	PackedRequestMethodMetricStateSchema,
 	REQUEST_METHOD_METRICS_QUERY_NAME,
 } from "./packed-request-method-state";
+import {
+	PackedSSLCertificateMetricStateSchema,
+	SSL_CERTIFICATES_QUERY_NAME,
+} from "./packed-ssl-certificates-state";
 
 /** Query names currently backed by compact metric snapshots. */
 export const PACKED_METRIC_QUERIES = [
+	CACHE_MISS_METRICS_QUERY_NAME,
+	COLO_ERROR_METRICS_QUERY_NAME,
 	COLO_METRICS_QUERY_NAME,
+	LB_WEIGHT_METRICS_QUERY_NAME,
+	LOGPUSH_ZONE_METRICS_QUERY_NAME,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
 	REQUEST_METHOD_METRICS_QUERY_NAME,
-	CACHE_MISS_METRICS_QUERY_NAME,
+	SSL_CERTIFICATES_QUERY_NAME,
 ] as const;
 export type PackedMetricQuery = (typeof PACKED_METRIC_QUERIES)[number];
 
 const METRIC_DEFINITION_PACKED_QUERIES = [
+	COLO_ERROR_METRICS_QUERY_NAME,
 	COLO_METRICS_QUERY_NAME,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
 ] as const;
@@ -41,10 +63,14 @@ export type MetricDefinitionPackedQuery =
  * already accumulated.
  */
 const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
+	[CACHE_MISS_METRICS_QUERY_NAME]: "packed-cache-miss-metrics",
+	[COLO_ERROR_METRICS_QUERY_NAME]: "packed-colo-error-metrics",
 	[COLO_METRICS_QUERY_NAME]: "packed-colo-metrics",
+	[LB_WEIGHT_METRICS_QUERY_NAME]: "packed-lb-weight-metrics",
+	[LOGPUSH_ZONE_METRICS_QUERY_NAME]: "packed-logpush-zone-metrics",
 	[ORIGIN_STATUS_METRICS_QUERY_NAME]: "packed-origin-status-metrics",
 	[REQUEST_METHOD_METRICS_QUERY_NAME]: "packed-request-method-metrics",
-	[CACHE_MISS_METRICS_QUERY_NAME]: "packed-cache-miss-metrics",
+	[SSL_CERTIFICATES_QUERY_NAME]: "packed-ssl-certificates",
 };
 
 /**
@@ -52,10 +78,14 @@ const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
  * here while the exporter and coordinators continue using this generic facade.
  */
 export const PackedMetricStateSchema = z.discriminatedUnion("queryName", [
+	PackedCacheMissMetricStateSchema,
+	PackedColoErrorMetricStateSchema,
 	PackedColoMetricStateSchema,
+	PackedLbWeightMetricStateSchema,
+	PackedLogpushZoneMetricStateSchema,
 	PackedOriginStatusMetricStateSchema,
 	PackedRequestMethodMetricStateSchema,
-	PackedCacheMissMetricStateSchema,
+	PackedSSLCertificateMetricStateSchema,
 ]);
 export type PackedMetricState = z.infer<typeof PackedMetricStateSchema>;
 
@@ -80,18 +110,17 @@ export function packedMetricStorageEnabled(
 	return config.packedMetricStorage;
 }
 
-/**
- * Returns the presentation scopes represented by a compact snapshot.
- * Every codec ages rows through the `misses` column, so its length is the
- * row count regardless of which query produced the snapshot.
- */
+/** Returns the presentation scopes represented by a compact snapshot. */
 export function packedMetricScopes(state: PackedMetricState): string[] {
 	switch (state.queryName) {
 		case CACHE_MISS_METRICS_QUERY_NAME:
 			return state.zones
 				.filter((zone) => zone.rows.some((row) => row.count > 0))
 				.map((zone) => zone.zone);
+		case LB_WEIGHT_METRICS_QUERY_NAME:
+		case LOGPUSH_ZONE_METRICS_QUERY_NAME:
 		case REQUEST_METHOD_METRICS_QUERY_NAME:
+		case SSL_CERTIFICATES_QUERY_NAME:
 			return state.zones
 				.filter((zone) => zone.rows.length > 0)
 				.map((zone) => zone.zone);
@@ -137,6 +166,18 @@ export function accumulatePackedMetricState(
 	};
 
 	switch (input.queryName) {
+		case COLO_ERROR_METRICS_QUERY_NAME:
+			return {
+				...envelope,
+				format: "colo-error-packed-by-zone-v1",
+				queryName: COLO_ERROR_METRICS_QUERY_NAME,
+				zones: accumulatePackedColoErrorRows(
+					previousFor(input.previous, COLO_ERROR_METRICS_QUERY_NAME),
+					input.metrics,
+					input.ingestId,
+					input.failedScopes,
+				),
+			};
 		case COLO_METRICS_QUERY_NAME:
 			return {
 				...envelope,
@@ -161,6 +202,12 @@ export function accumulatePackedMetricState(
 					input.failedScopes,
 				),
 			};
+		default: {
+			const _exhaustive: never = input.queryName;
+			throw new Error(
+				`Unsupported packed metric definition query: ${_exhaustive}`,
+			);
+		}
 	}
 }
 

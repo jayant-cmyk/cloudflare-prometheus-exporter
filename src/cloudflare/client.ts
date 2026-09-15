@@ -17,10 +17,25 @@ import {
 	type CacheMissZone,
 } from "../lib/packed-cache-miss-state";
 import {
+	LB_WEIGHT_METRIC_HELP,
+	LB_WEIGHT_METRIC_NAME,
+	type LbWeightZone,
+} from "../lib/packed-lb-weight-state";
+import {
+	LOGPUSH_ZONE_METRIC_HELP,
+	LOGPUSH_ZONE_METRIC_NAME,
+	type LogpushZone,
+} from "../lib/packed-logpush-zone-state";
+import {
 	REQUEST_METHOD_METRIC_HELP,
 	REQUEST_METHOD_METRIC_NAME,
 	type RequestMethodZone,
 } from "../lib/packed-request-method-state";
+import {
+	SSL_CERTIFICATES_METRIC_HELP,
+	SSL_CERTIFICATES_METRIC_NAME,
+	type SSLCertificateZone,
+} from "../lib/packed-ssl-certificates-state";
 import { getEnvDefaults } from "../lib/runtime-config";
 import type {
 	Account,
@@ -628,6 +643,101 @@ export class CloudflareMetricsClient {
 			});
 		}
 		return buckets;
+	}
+
+	async getPackedLogpushZoneRows(
+		zoneIds: string[],
+		zones: Zone[],
+		timeRange: TimeRange,
+	): Promise<LogpushZone[]> {
+		const result = await this.gql.query(LogpushZoneMetricsQuery, {
+			zoneIDs: zoneIds,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("logpush-zone", result.error);
+		}
+
+		const buckets: LogpushZone[] = [];
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			buckets.push({
+				zone: findZoneName(zoneData.zoneTag, zones),
+				rows: (zoneData.logpushHealthAdaptiveGroups ?? [])
+					.filter((group) => group.count != null && group.count > 0)
+					.map((group) => ({
+						jobId: String(group.dimensions?.jobId ?? ""),
+						destinationType: group.dimensions?.destinationType ?? "",
+						count: group.count ?? 0,
+					})),
+			});
+		}
+		return buckets;
+	}
+
+	async getPackedSSLCertificateZone(zone: Zone): Promise<SSLCertificateZone> {
+		this.logger.info("Fetching SSL certificate metrics for zone", {
+			zone: zone.name,
+		});
+
+		try {
+			const certs = await this.getSSLCertificates(zone.id);
+			return {
+				zone: zone.name,
+				rows: certs.map((cert) => ({
+					type: cert.type,
+					issuer: cert.issuer,
+					status: cert.status,
+					expiresOnSeconds: cert.expiresOn
+						? new Date(cert.expiresOn).getTime() / 1000
+						: 0,
+				})),
+			};
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.warn("Failed to fetch SSL certs for zone", {
+				zone: zone.name,
+				error: msg,
+			});
+			return { zone: zone.name, rows: [] };
+		}
+	}
+
+	async getPackedLbWeightZone(zone: Zone): Promise<LbWeightZone> {
+		this.logger.info("Fetching LB weight metrics for zone", {
+			zone: zone.name,
+		});
+
+		try {
+			const lbConfigs = await this.getLoadBalancerConfigs(
+				zone.id,
+				zone.account.id,
+			);
+			return {
+				zone: zone.name,
+				rows: lbConfigs.flatMap((lb) =>
+					lb.pools.flatMap((pool) =>
+						pool.origins
+							.filter((origin) => origin.enabled)
+							.map((origin) => ({
+								lbName: lb.name,
+								poolName: pool.name,
+								originName: origin.name,
+								weight: origin.weight,
+							})),
+					),
+				),
+			};
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.logger.warn("Failed to fetch LB weights for zone", {
+				zone: zone.name,
+				error: msg,
+			});
+			return { zone: zone.name, rows: [] };
+		}
 	}
 
 	/**
@@ -3061,39 +3171,27 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(LogpushZoneMetricsQuery, {
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
-
-		if (result.error) {
-			throw graphQLQueryError("logpush-zone", result.error);
-		}
-
 		const failedJobs: MetricDefinition = {
-			name: "cloudflare_logpush_failed_jobs_zone_total",
-			help: "Failed logpush jobs per zone",
+			name: LOGPUSH_ZONE_METRIC_NAME,
+			help: LOGPUSH_ZONE_METRIC_HELP,
 			type: "counter",
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
-
-			for (const group of zoneData.logpushHealthAdaptiveGroups ?? []) {
-				const dim = group.dimensions;
-				if (group.count != null && group.count > 0) {
-					failedJobs.values.push({
-						labels: {
-							zone: zoneName,
-							job_id: String(dim?.jobId ?? ""),
-							destination_type: dim?.destinationType ?? "",
-						},
-						value: group.count,
-					});
-				}
+		for (const zone of await this.getPackedLogpushZoneRows(
+			zoneIds,
+			zones,
+			timeRange,
+		)) {
+			for (const row of zone.rows) {
+				failedJobs.values.push({
+					labels: {
+						zone: zone.zone,
+						job_id: row.jobId,
+						destination_type: row.destinationType,
+					},
+					value: row.count,
+				});
 			}
 		}
 
@@ -3285,34 +3383,23 @@ export class CloudflareMetricsClient {
 	 */
 	private async getLbWeightMetrics(zones: Zone[]): Promise<MetricDefinition[]> {
 		const originWeight: MetricDefinition = {
-			name: "cloudflare_zone_lb_origin_weight",
-			help: "Load balancer origin weight (0-1 normalized)",
+			name: LB_WEIGHT_METRIC_NAME,
+			help: LB_WEIGHT_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
 		for (const zone of zones) {
-			const lbConfigs = await this.getLoadBalancerConfigs(
-				zone.id,
-				zone.account.id,
-			);
-
-			for (const lb of lbConfigs) {
-				for (const pool of lb.pools) {
-					for (const origin of pool.origins) {
-						if (origin.enabled) {
-							originWeight.values.push({
-								labels: {
-									zone: zone.name,
-									lb_name: lb.name,
-									pool_name: pool.name,
-									origin_name: origin.name,
-								},
-								value: origin.weight,
-							});
-						}
-					}
-				}
+			for (const row of (await this.getPackedLbWeightZone(zone)).rows) {
+				originWeight.values.push({
+					labels: {
+						zone: zone.name,
+						lb_name: row.lbName,
+						pool_name: row.poolName,
+						origin_name: row.originName,
+					},
+					value: row.weight,
+				});
 			}
 		}
 
@@ -3329,37 +3416,26 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 	): Promise<MetricDefinition[]> {
 		const certStatus: MetricDefinition = {
-			name: "cloudflare_zone_certificate_validation_status",
-			help: "Certificate expiry timestamp",
+			name: SSL_CERTIFICATES_METRIC_NAME,
+			help: SSL_CERTIFICATES_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
-		// Fetch all certs in parallel via DataLoader batching
-		const certsResults = await Promise.all(
-			zones.map((zone) =>
-				this.getSSLCertificates(zone.id)
-					.then((certs) => ({ zone, certs }))
-					.catch(() => {
-						this.logger.warn("Failed to fetch SSL certs", { zone: zone.name });
-						return { zone, certs: [] as SSLCertificate[] };
-					}),
-			),
+		const certZones = await Promise.all(
+			zones.map((zone) => this.getPackedSSLCertificateZone(zone)),
 		);
 
-		for (const { zone, certs } of certsResults) {
-			for (const cert of certs) {
-				const expiresOn = cert.expiresOn
-					? new Date(cert.expiresOn).getTime() / 1000
-					: 0;
+		for (const zone of certZones) {
+			for (const row of zone.rows) {
 				certStatus.values.push({
 					labels: {
-						zone: zone.name,
-						type: cert.type,
-						issuer: cert.issuer,
-						status: cert.status,
+						zone: zone.zone,
+						type: row.type,
+						issuer: row.issuer,
+						status: row.status,
 					},
-					value: expiresOn,
+					value: row.expiresOnSeconds,
 				});
 			}
 		}
@@ -3377,38 +3453,22 @@ export class CloudflareMetricsClient {
 	async getSSLCertificateMetricsForZone(
 		zone: Zone,
 	): Promise<MetricDefinition[]> {
-		this.logger.info("Fetching SSL certificate metrics for zone", {
-			zone: zone.name,
-		});
-
 		const certStatus: MetricDefinition = {
-			name: "cloudflare_zone_certificate_validation_status",
-			help: "Certificate expiry timestamp",
+			name: SSL_CERTIFICATES_METRIC_NAME,
+			help: SSL_CERTIFICATES_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
-		try {
-			const certs = await this.getSSLCertificates(zone.id);
-			for (const cert of certs) {
-				const expiresOn = cert.expiresOn
-					? new Date(cert.expiresOn).getTime() / 1000
-					: 0;
-				certStatus.values.push({
-					labels: {
-						zone: zone.name,
-						type: cert.type,
-						issuer: cert.issuer,
-						status: cert.status,
-					},
-					value: expiresOn,
-				});
-			}
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			this.logger.warn("Failed to fetch SSL certs for zone", {
-				zone: zone.name,
-				error: msg,
+		for (const row of (await this.getPackedSSLCertificateZone(zone)).rows) {
+			certStatus.values.push({
+				labels: {
+					zone: zone.name,
+					type: row.type,
+					issuer: row.issuer,
+					status: row.status,
+				},
+				value: row.expiresOnSeconds,
 			});
 		}
 
@@ -3423,45 +3483,22 @@ export class CloudflareMetricsClient {
 	 * @returns Promise of LB weight metrics.
 	 */
 	async getLbWeightMetricsForZone(zone: Zone): Promise<MetricDefinition[]> {
-		this.logger.info("Fetching LB weight metrics for zone", {
-			zone: zone.name,
-		});
-
 		const originWeight: MetricDefinition = {
-			name: "cloudflare_zone_lb_origin_weight",
-			help: "Load balancer origin weight (0-1 normalized)",
+			name: LB_WEIGHT_METRIC_NAME,
+			help: LB_WEIGHT_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
-		try {
-			const lbConfigs = await this.getLoadBalancerConfigs(
-				zone.id,
-				zone.account.id,
-			);
-
-			for (const lb of lbConfigs) {
-				for (const pool of lb.pools) {
-					for (const origin of pool.origins) {
-						if (origin.enabled) {
-							originWeight.values.push({
-								labels: {
-									zone: zone.name,
-									lb_name: lb.name,
-									pool_name: pool.name,
-									origin_name: origin.name,
-								},
-								value: origin.weight,
-							});
-						}
-					}
-				}
-			}
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			this.logger.warn("Failed to fetch LB configs for zone", {
-				zone: zone.name,
-				error: msg,
+		for (const row of (await this.getPackedLbWeightZone(zone)).rows) {
+			originWeight.values.push({
+				labels: {
+					zone: zone.name,
+					lb_name: row.lbName,
+					pool_name: row.poolName,
+					origin_name: row.originName,
+				},
+				value: row.weight,
 			});
 		}
 
