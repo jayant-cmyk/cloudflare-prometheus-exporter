@@ -46,6 +46,24 @@ export type CacheMissMetricScenario = Readonly<{
 	}>;
 }>;
 
+export type AdaptiveMetricScenario = Readonly<{
+	name: string;
+	path: Readonly<{
+		metric: "adaptive-metrics";
+		operations: readonly ["refresh", "read"];
+	}>;
+	scale: Readonly<{
+		zones: number;
+		countriesPerZone: number;
+		hostsPerCountry: number;
+		statusesPerHost: number;
+		trafficPerSeries: Readonly<{
+			count: number;
+			avgOriginDurationMs: number;
+		}>;
+	}>;
+}>;
+
 export type ColoErrorMetricScenario = Readonly<{
 	name: string;
 	path: Readonly<{
@@ -168,6 +186,43 @@ export const REQUEST_METHOD_METRIC_SCENARIOS = [
 		},
 	},
 ] satisfies readonly RequestMethodMetricScenario[];
+
+export const ADAPTIVE_METRIC_SCENARIOS = [
+	{
+		name: "small adaptive account",
+		path: {
+			metric: "adaptive-metrics",
+			operations: ["refresh", "read"],
+		},
+		scale: {
+			zones: 1,
+			countriesPerZone: 10,
+			hostsPerCountry: 10,
+			statusesPerHost: 2,
+			trafficPerSeries: {
+				count: 10,
+				avgOriginDurationMs: 800,
+			},
+		},
+	},
+	{
+		name: "large adaptive account",
+		path: {
+			metric: "adaptive-metrics",
+			operations: ["refresh", "read"],
+		},
+		scale: {
+			zones: 15,
+			countriesPerZone: 10,
+			hostsPerCountry: 200,
+			statusesPerHost: 2,
+			trafficPerSeries: {
+				count: 10,
+				avgOriginDurationMs: 800,
+			},
+		},
+	},
+] satisfies readonly AdaptiveMetricScenario[];
 
 export const CACHE_MISS_METRIC_SCENARIOS = [
 	{

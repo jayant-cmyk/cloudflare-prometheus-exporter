@@ -1,3 +1,8 @@
+import { serializePackedAdaptiveMetrics } from "./packed-adaptive-prometheus";
+import {
+	ADAPTIVE_METRICS_QUERY_NAME,
+	type PackedAdaptiveMetricState,
+} from "./packed-adaptive-state";
 import { serializePackedCacheMissMetrics } from "./packed-cache-miss-prometheus";
 import {
 	CACHE_MISS_METRICS_QUERY_NAME,
@@ -50,6 +55,7 @@ export function* serializePackedMetrics(
 	states: readonly PackedMetricState[],
 	options: SerializeOptions,
 ): Generator<string> {
+	const adaptiveStates: PackedAdaptiveMetricState[] = [];
 	const coloStates: PackedColoMetricState[] = [];
 	const cacheMissStates: PackedCacheMissMetricState[] = [];
 	const coloErrorStates: PackedColoErrorMetricState[] = [];
@@ -60,6 +66,9 @@ export function* serializePackedMetrics(
 	const sslCertificateStates: PackedSSLCertificateMetricState[] = [];
 	for (const state of states) {
 		switch (state.queryName) {
+			case ADAPTIVE_METRICS_QUERY_NAME:
+				adaptiveStates.push(state);
+				break;
 			case CACHE_MISS_METRICS_QUERY_NAME:
 				cacheMissStates.push(state);
 				break;
@@ -87,6 +96,7 @@ export function* serializePackedMetrics(
 		}
 	}
 
+	yield* serializePackedAdaptiveMetrics(adaptiveStates, options);
 	yield* serializePackedCacheMissMetrics(cacheMissStates, options);
 	yield* serializePackedColoErrorMetrics(coloErrorStates, options);
 	yield* serializePackedColoMetrics(coloStates, options);

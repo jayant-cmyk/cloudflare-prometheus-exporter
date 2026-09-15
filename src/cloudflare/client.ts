@@ -12,6 +12,17 @@ import {
 } from "../lib/logger";
 import type { MetricDefinition } from "../lib/metrics";
 import {
+	ADAPTIVE_4XX_METRIC_HELP,
+	ADAPTIVE_4XX_METRIC_NAME,
+	ADAPTIVE_5XX_METRIC_HELP,
+	ADAPTIVE_5XX_METRIC_NAME,
+	ADAPTIVE_DURATION_METRIC_HELP,
+	ADAPTIVE_DURATION_METRIC_NAME,
+	ADAPTIVE_RATE_METRIC_HELP,
+	ADAPTIVE_RATE_METRIC_NAME,
+	type AdaptiveZone,
+} from "../lib/packed-adaptive-state";
+import {
 	CACHE_MISS_METRIC_HELP,
 	CACHE_MISS_METRIC_NAME,
 	type CacheMissZone,
@@ -604,6 +615,58 @@ export class CloudflareMetricsClient {
 						count: group.count ?? 0,
 					})),
 			});
+		}
+		return buckets;
+	}
+
+	async getPackedAdaptiveZones(
+		zoneIds: string[],
+		zones: Zone[],
+		timeRange: TimeRange,
+	): Promise<AdaptiveZone[]> {
+		const result = await this.gql.query(AdaptiveMetricsQuery, {
+			zoneIDs: zoneIds,
+			mintime: timeRange.mintime,
+			maxtime: timeRange.maxtime,
+			limit: this.config.queryLimit,
+		});
+
+		if (result.error) {
+			throw graphQLQueryError("adaptive-metrics", result.error);
+		}
+
+		const buckets: AdaptiveZone[] = [];
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			const bucket: AdaptiveZone = {
+				zone: findZoneName(zoneData.zoneTag, zones),
+				rows: [],
+				errors4xx: 0,
+				errors5xx: 0,
+			};
+			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
+				const dim = group.dimensions;
+				const statusCode = dim?.originResponseStatus ?? 0;
+				const count = group.count ?? 0;
+				const avgOriginDurationMs = group.avg?.originResponseDurationMs ?? null;
+				if (count > 0 || avgOriginDurationMs != null) {
+					bucket.rows.push({
+						status: String(statusCode),
+						country: dim?.clientCountryName ?? "",
+						host: dim?.clientRequestHTTPHost ?? "",
+						count,
+						avgOriginDurationMs,
+					});
+				}
+				if (count <= 0) {
+					continue;
+				}
+				if (statusCode >= 400 && statusCode < 500) {
+					bucket.errors4xx += count;
+				} else if (statusCode >= 500) {
+					bucket.errors5xx += count;
+				}
+			}
+			buckets.push(bucket);
 		}
 		return buckets;
 	}
@@ -2211,89 +2274,65 @@ export class CloudflareMetricsClient {
 		zones: Zone[],
 		timeRange: TimeRange,
 	): Promise<MetricDefinition[]> {
-		const result = await this.gql.query(AdaptiveMetricsQuery, {
-			zoneIDs: zoneIds,
-			mintime: timeRange.mintime,
-			maxtime: timeRange.maxtime,
-			limit: this.config.queryLimit,
-		});
-
-		if (result.error) {
-			throw graphQLQueryError("adaptive-metrics", result.error);
-		}
-
 		const error4xx: MetricDefinition = {
-			name: "cloudflare_zone_customer_error_4xx_total",
-			help: "4xx error requests",
+			name: ADAPTIVE_4XX_METRIC_NAME,
+			help: ADAPTIVE_4XX_METRIC_HELP,
 			type: "counter",
 			values: [],
 		};
 		const error5xx: MetricDefinition = {
-			name: "cloudflare_zone_customer_error_5xx_total",
-			help: "5xx error requests",
+			name: ADAPTIVE_5XX_METRIC_NAME,
+			help: ADAPTIVE_5XX_METRIC_HELP,
 			type: "counter",
 			values: [],
 		};
 		const originDuration: MetricDefinition = {
-			name: "cloudflare_zone_origin_response_duration_seconds",
-			help: "Origin response duration in seconds",
+			name: ADAPTIVE_DURATION_METRIC_NAME,
+			help: ADAPTIVE_DURATION_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 		const originErrorRate: MetricDefinition = {
-			name: "cloudflare_zone_origin_error_rate",
-			help: "Origin error rate (4xx+5xx / total origin errors)",
+			name: ADAPTIVE_RATE_METRIC_NAME,
+			help: ADAPTIVE_RATE_METRIC_HELP,
 			type: "gauge",
 			values: [],
 		};
 
-		// Track totals for error rate calculation
-		const zoneStats: Record<string, { errors4xx: number; errors5xx: number }> =
-			{};
-
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
-
-			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
-				const dim = group.dimensions;
-				const status = dim?.originResponseStatus ?? 0;
-				const count = group.count ?? 0;
+		for (const zone of await this.getPackedAdaptiveZones(
+			zoneIds,
+			zones,
+			timeRange,
+		)) {
+			for (const row of zone.rows) {
 				const labels = {
-					zone: zoneName,
-					status: String(status),
-					country: dim?.clientCountryName ?? "",
-					host: dim?.clientRequestHTTPHost ?? "",
+					zone: zone.zone,
+					status: row.status,
+					country: row.country,
+					host: row.host,
 				};
-
-				if (status >= 400 && status < 500 && count > 0) {
-					error4xx.values.push({ labels, value: count });
-					if (!zoneStats[zoneName]) {
-						zoneStats[zoneName] = { errors4xx: 0, errors5xx: 0 };
-					}
-					zoneStats[zoneName].errors4xx += count;
-				} else if (status >= 500 && count > 0) {
-					error5xx.values.push({ labels, value: count });
-					if (!zoneStats[zoneName]) {
-						zoneStats[zoneName] = { errors4xx: 0, errors5xx: 0 };
-					}
-					zoneStats[zoneName].errors5xx += count;
+				if (
+					Number(row.status) >= 400 &&
+					Number(row.status) < 500 &&
+					row.count > 0
+				) {
+					error4xx.values.push({ labels, value: row.count });
+				} else if (Number(row.status) >= 500 && row.count > 0) {
+					error5xx.values.push({ labels, value: row.count });
 				}
-
-				const avgDuration = group.avg?.originResponseDurationMs;
-				if (avgDuration != null) {
-					// Convert milliseconds to seconds
-					originDuration.values.push({ labels, value: avgDuration / 1000 });
+				if (row.avgOriginDurationMs != null) {
+					originDuration.values.push({
+						labels,
+						value: row.avgOriginDurationMs / 1000,
+					});
 				}
 			}
-		}
 
-		// Emit origin error rate (ratio of 5xx to total errors)
-		for (const [zone, stats] of Object.entries(zoneStats)) {
-			const total = stats.errors4xx + stats.errors5xx;
+			const total = zone.errors4xx + zone.errors5xx;
 			if (total > 0) {
 				originErrorRate.values.push({
-					labels: { zone },
-					value: stats.errors5xx / total,
+					labels: { zone: zone.zone },
+					value: zone.errors5xx / total,
 				});
 			}
 		}

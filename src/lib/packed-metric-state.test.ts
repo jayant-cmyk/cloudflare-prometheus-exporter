@@ -58,6 +58,7 @@ const originStatusMetrics: MetricDefinition[] = [
 describe("packed metric state facade", () => {
 	it("registers every packed query with its own storage key", () => {
 		expect(PACKED_METRIC_QUERIES).toEqual([
+			"adaptive-metrics",
 			"cache-miss-metrics",
 			"colo-error-metrics",
 			"colo-metrics",
@@ -67,6 +68,7 @@ describe("packed metric state facade", () => {
 			"request-method-metrics",
 			"ssl-certificates",
 		]);
+		expect(isPackedMetricQuery("adaptive-metrics")).toBe(true);
 		expect(isPackedMetricQuery("colo-error-metrics")).toBe(true);
 		expect(isPackedMetricQuery("colo-metrics")).toBe(true);
 		expect(isPackedMetricQuery("lb-weight-metrics")).toBe(true);
@@ -75,6 +77,9 @@ describe("packed metric state facade", () => {
 		expect(isPackedMetricQuery("request-method-metrics")).toBe(true);
 		expect(isPackedMetricQuery("cache-miss-metrics")).toBe(true);
 		expect(isPackedMetricQuery("ssl-certificates")).toBe(true);
+		expect(packedMetricStateKey("adaptive-metrics")).toBe(
+			"packed-adaptive-metrics",
+		);
 		expect(packedMetricStateKey("cache-miss-metrics")).toBe(
 			"packed-cache-miss-metrics",
 		);

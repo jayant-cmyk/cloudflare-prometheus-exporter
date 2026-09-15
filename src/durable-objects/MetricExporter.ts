@@ -27,6 +27,13 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
+	ADAPTIVE_METRICS_QUERY_NAME,
+	type AdaptiveZone,
+	adaptiveCounterObservations,
+	buildPackedAdaptiveZones,
+	type PackedAdaptiveMetricState,
+} from "../lib/packed-adaptive-state";
+import {
 	CACHE_MISS_METRICS_QUERY_NAME,
 	type CacheMissZone,
 	type PackedCacheMissMetricState,
@@ -519,7 +526,8 @@ export class MetricExporter extends DurableObject<Env> {
 					packedMetricStateKey(state.queryName),
 				);
 				if (
-					state.queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
+					(state.queryName === REQUEST_METHOD_METRICS_QUERY_NAME ||
+						state.queryName === ADAPTIVE_METRICS_QUERY_NAME) &&
 					packedSnapshot !== undefined
 				) {
 					state = {
@@ -714,6 +722,9 @@ export class MetricExporter extends DurableObject<Env> {
 			const packedRequestMethod =
 				queryName === REQUEST_METHOD_METRICS_QUERY_NAME &&
 				packedMetricStorageEnabled(queryName, config);
+			const packedAdaptive =
+				queryName === ADAPTIVE_METRICS_QUERY_NAME &&
+				packedMetricStorageEnabled(queryName, config);
 			const packedCacheMiss =
 				queryName === CACHE_MISS_METRICS_QUERY_NAME &&
 				packedMetricStorageEnabled(queryName, config);
@@ -723,6 +734,26 @@ export class MetricExporter extends DurableObject<Env> {
 
 			if (zonesToQuery.length <= ZONES_PER_CHUNK) {
 				const zoneIds = zonesToQuery.map((z) => z.id);
+				if (packedAdaptive) {
+					const packed = await this.buildPackedAdaptiveState(
+						state,
+						await client.getPackedAdaptiveZones(
+							zoneIds,
+							zonesToQuery,
+							timeRange,
+						),
+						ingestId,
+						new Set(),
+					);
+					return {
+						metrics: [],
+						packedMetricState: packed.state,
+						packedCounters: packed.counters,
+						partialErrors: [],
+						failedScopes: new Set(),
+						zoneRetryAfter: {},
+					};
+				}
 				if (packedRequestMethod) {
 					const packed = await this.buildPackedRequestMethodState(
 						state,
@@ -821,6 +852,7 @@ export class MetricExporter extends DurableObject<Env> {
 			let longestRetryError: unknown;
 			let longestRetrySeconds = config.metricRefreshIntervalSeconds;
 			const requestMethodRows: RequestMethodZone[] = [];
+			const adaptiveRows: AdaptiveZone[] = [];
 			const cacheMissRows: CacheMissZone[] = [];
 			const logpushZoneRows: LogpushZone[] = [];
 			for (let i = 0; i < queryableZones.length; i += ZONES_PER_CHUNK) {
@@ -829,7 +861,10 @@ export class MetricExporter extends DurableObject<Env> {
 
 				try {
 					const metrics =
-						packedRequestMethod || packedCacheMiss || packedLogpushZone
+						packedAdaptive ||
+						packedRequestMethod ||
+						packedCacheMiss ||
+						packedLogpushZone
 							? []
 							: await client.getZoneMetrics(
 									queryName,
@@ -842,6 +877,15 @@ export class MetricExporter extends DurableObject<Env> {
 									config.httpStatusGroup,
 									config.packedMetricStorage,
 								);
+					if (packedAdaptive) {
+						adaptiveRows.push(
+							...(await client.getPackedAdaptiveZones(
+								chunkIds,
+								chunkZones,
+								timeRange,
+							)),
+						);
+					}
 					if (packedRequestMethod) {
 						requestMethodRows.push(
 							...(await client.getPackedRequestMethodZones(
@@ -908,6 +952,22 @@ export class MetricExporter extends DurableObject<Env> {
 				const packed = await this.buildPackedRequestMethodState(
 					state,
 					requestMethodRows,
+					ingestId,
+					failedScopes,
+				);
+				return {
+					metrics: [],
+					packedMetricState: packed.state,
+					packedCounters: packed.counters,
+					partialErrors,
+					failedScopes,
+					zoneRetryAfter,
+				};
+			}
+			if (packedAdaptive) {
+				const packed = await this.buildPackedAdaptiveState(
+					state,
+					adaptiveRows,
 					ingestId,
 					failedScopes,
 				);
@@ -1134,6 +1194,43 @@ export class MetricExporter extends DurableObject<Env> {
 				lastFetch: Date.now(),
 				lastIngest: ingestId,
 				zones: buildPackedRequestMethodZones(accumulated.observations),
+			},
+			counters: accumulated.counters,
+		};
+	}
+
+	private async buildPackedAdaptiveState(
+		state: MetricExporterState,
+		zones: readonly AdaptiveZone[],
+		ingestId: number,
+		failedScopes: ReadonlySet<string>,
+	): Promise<{
+		state: PackedAdaptiveMetricState;
+		counters: Record<string, CounterState>;
+	}> {
+		const previousPacked = await this.loadPackedMetricState(
+			ADAPTIVE_METRICS_QUERY_NAME,
+		);
+		const accumulated = accumulateCounterObservations(
+			adaptiveCounterObservations(zones),
+			previousPacked?.queryName === ADAPTIVE_METRICS_QUERY_NAME
+				? state.counters
+				: {},
+			{
+				ingestId,
+				ageMissingCounters: state.lastIngest !== ingestId,
+				failedScopes,
+			},
+		);
+		return {
+			state: {
+				format: "adaptive-packed-by-zone-v1",
+				accountId: state.accountId,
+				accountName: state.accountName,
+				queryName: ADAPTIVE_METRICS_QUERY_NAME,
+				lastFetch: Date.now(),
+				lastIngest: ingestId,
+				zones: buildPackedAdaptiveZones(accumulated.observations, zones),
 			},
 			counters: accumulated.counters,
 		};

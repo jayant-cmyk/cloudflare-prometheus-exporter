@@ -567,6 +567,160 @@ describe("MetricExporter packed origin status storage", () => {
 	});
 });
 
+async function createAdaptiveHarness() {
+	const storage = new AlarmStorage();
+	const zone = {
+		id: "zone-id",
+		name: "example.com",
+		status: "active",
+		plan: { id: "paid", name: "Paid" },
+		account: { id: "account-id", name: "Account" },
+	};
+	storage.values.set("state", {
+		...storedState(),
+		queryName: "adaptive-metrics",
+		zones: [zone],
+	});
+	let packed = false;
+	let observations = [
+		{
+			status: 404,
+			country: "US",
+			host: "a.example.com",
+			count: 3,
+			avgOriginDurationMs: 1200,
+		},
+		{
+			status: 500,
+			country: "DE",
+			host: "b.example.com",
+			count: 2,
+			avgOriginDurationMs: 900,
+		},
+	];
+	vi.stubGlobal(
+		"fetch",
+		async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						viewer: {
+							zones: [
+								{
+									zoneTag: zone.id,
+									httpRequestsAdaptiveGroups: observations.map((row) => ({
+										dimensions: {
+											originResponseStatus: row.status,
+											clientCountryName: row.country,
+											clientRequestHTTPHost: row.host,
+										},
+										count: row.count,
+										avg: {
+											originResponseDurationMs: row.avgOriginDurationMs,
+										},
+									})),
+								},
+							],
+						},
+					},
+				}),
+				{ headers: { "content-type": "application/json" } },
+			),
+	);
+	const env = {
+		CLOUDFLARE_API_TOKEN: "test-token",
+		CONFIG_KV: {
+			get: async () => JSON.stringify({ packedMetricStorage: packed }),
+		},
+		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
+	};
+	let { exporter, ready } = createExporter(storage, env);
+	await ready;
+	return {
+		storage,
+		get exporter() {
+			return exporter;
+		},
+		setPacked(enabled: boolean) {
+			packed = enabled;
+		},
+		setObservations(rows: typeof observations) {
+			observations = rows;
+		},
+		async restart() {
+			({ exporter, ready } = createExporter(storage, env));
+			await ready;
+		},
+		async refresh(minute: number) {
+			await exporter.triggerRefresh({
+				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
+				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
+			});
+		},
+		async snapshot() {
+			const state = await exporter.exportPackedMetrics();
+			if (state !== undefined && state.queryName !== "adaptive-metrics") {
+				throw new Error("expected a packed adaptive snapshot");
+			}
+			return state;
+		},
+	};
+}
+
+describe("MetricExporter packed adaptive storage", () => {
+	it("stores compact rows and keeps generic metrics empty", async () => {
+		const h = await createAdaptiveHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+
+		expect((await h.snapshot())?.zones).toEqual([
+			{
+				zone: "example.com",
+				status: ["404", "500"],
+				country: ["US", "DE"],
+				host: ["a.example.com", "b.example.com"],
+				count: [3, 2],
+				avgOriginDurationMs: [1200, 900],
+				errors4xx: 3,
+				errors5xx: 2,
+			},
+		]);
+		expect(h.storage.values.get("state")).toMatchObject({
+			metrics: [],
+			lastError: null,
+		});
+		expect([...h.storage.values.keys()]).toContain("packed-adaptive-metrics");
+	});
+
+	it("accumulates counter rows across refreshes and keeps current rate inputs", async () => {
+		const h = await createAdaptiveHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		await h.refresh(2);
+
+		expect((await h.snapshot())?.zones[0]).toMatchObject({
+			count: [6, 4],
+			errors4xx: 3,
+			errors5xx: 2,
+		});
+	});
+
+	it("starts a fresh packed generation after the flag was disabled", async () => {
+		const h = await createAdaptiveHarness();
+		h.setPacked(true);
+		await h.refresh(1);
+		expect((await h.snapshot())?.zones[0]?.count).toEqual([3, 2]);
+
+		h.setPacked(false);
+		await h.refresh(2);
+		expect(await h.snapshot()).toBeUndefined();
+
+		h.setPacked(true);
+		await h.refresh(3);
+		expect((await h.snapshot())?.zones[0]?.count).toEqual([3, 2]);
+	});
+});
+
 async function createRequestMethodHarness() {
 	const storage = new AlarmStorage();
 	const zone = {

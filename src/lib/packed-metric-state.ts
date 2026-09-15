@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { MetricDefinition } from "./metrics";
 import {
+	ADAPTIVE_METRICS_QUERY_NAME,
+	PackedAdaptiveMetricStateSchema,
+} from "./packed-adaptive-state";
+import {
 	CACHE_MISS_METRICS_QUERY_NAME,
 	PackedCacheMissMetricStateSchema,
 } from "./packed-cache-miss-state";
@@ -38,6 +42,7 @@ import {
 
 /** Query names currently backed by compact metric snapshots. */
 export const PACKED_METRIC_QUERIES = [
+	ADAPTIVE_METRICS_QUERY_NAME,
 	CACHE_MISS_METRICS_QUERY_NAME,
 	COLO_ERROR_METRICS_QUERY_NAME,
 	COLO_METRICS_QUERY_NAME,
@@ -63,6 +68,7 @@ export type MetricDefinitionPackedQuery =
  * already accumulated.
  */
 const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
+	[ADAPTIVE_METRICS_QUERY_NAME]: "packed-adaptive-metrics",
 	[CACHE_MISS_METRICS_QUERY_NAME]: "packed-cache-miss-metrics",
 	[COLO_ERROR_METRICS_QUERY_NAME]: "packed-colo-error-metrics",
 	[COLO_METRICS_QUERY_NAME]: "packed-colo-metrics",
@@ -78,6 +84,7 @@ const PACKED_METRIC_STATE_KEYS: Record<PackedMetricQuery, string> = {
  * here while the exporter and coordinators continue using this generic facade.
  */
 export const PackedMetricStateSchema = z.discriminatedUnion("queryName", [
+	PackedAdaptiveMetricStateSchema,
 	PackedCacheMissMetricStateSchema,
 	PackedColoErrorMetricStateSchema,
 	PackedColoMetricStateSchema,
@@ -113,6 +120,10 @@ export function packedMetricStorageEnabled(
 /** Returns the presentation scopes represented by a compact snapshot. */
 export function packedMetricScopes(state: PackedMetricState): string[] {
 	switch (state.queryName) {
+		case ADAPTIVE_METRICS_QUERY_NAME:
+			return state.zones
+				.filter((zone) => zone.status.length > 0)
+				.map((zone) => zone.zone);
 		case CACHE_MISS_METRICS_QUERY_NAME:
 			return state.zones
 				.filter((zone) => zone.rows.some((row) => row.count > 0))
