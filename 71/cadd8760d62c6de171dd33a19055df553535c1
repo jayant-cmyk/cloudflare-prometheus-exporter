@@ -1,0 +1,31 @@
+src/lib/packed-edge-country.ts
+  s_68440dd29d9d97::t_053028b2b37158 1-186
+src/lib/packed-health-check.ts
+  s_68440dd29d9d97::t_67f1596a98629f 1-302
+src/lib/packed-hostname-http.test.ts
+  s_68440dd29d9d97::t_02788e2145a8d1 1-47
+src/lib/packed-hostname-http.ts
+  s_68440dd29d9d97::t_f4bd2cdc29548b 1-350
+test/integration/edge-country-metrics.test.ts
+  s_68440dd29d9d97::t_97985dfdc89c9a 1-87
+test/integration/health-check-metrics.test.ts
+  s_68440dd29d9d97::t_dd20cac271a457 1-116
+test/integration/hostname-http-metrics.test.ts
+  s_68440dd29d9d97::t_a591c389e56224 1-122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "71cadd8760d62c6de171dd33a19055df553535c1",
+  "prompts": {},
+  "sessions": {
+    "s_68440dd29d9d97": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5b05011dffehUN46AIXlpvVbd",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
