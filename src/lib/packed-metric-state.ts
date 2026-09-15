@@ -50,6 +50,11 @@ import {
 	PackedLbWeightMetricStateSchema,
 } from "./packed-lb-weight-state";
 import {
+	accumulatePackedLoadBalancerRows,
+	LOAD_BALANCER_METRICS_QUERY_NAME,
+	PackedLoadBalancerMetricStateSchema,
+} from "./packed-load-balancer";
+import {
 	LOGPUSH_ZONE_METRIC_NAME,
 	LOGPUSH_ZONE_METRICS_QUERY_NAME,
 	type LogpushZone,
@@ -85,6 +90,7 @@ export const PACKED_METRIC_QUERIES = [
 	EDGE_COUNTRY_METRICS_QUERY_NAME,
 	HEALTH_CHECK_METRICS_QUERY_NAME,
 	HOSTNAME_HTTP_METRICS_QUERY_NAME,
+	LOAD_BALANCER_METRICS_QUERY_NAME,
 	LB_WEIGHT_METRICS_QUERY_NAME,
 	LOGPUSH_ZONE_METRICS_QUERY_NAME,
 	ORIGIN_STATUS_METRICS_QUERY_NAME,
@@ -105,6 +111,7 @@ export const PackedMetricStateSchema = z.discriminatedUnion("queryName", [
 	PackedEdgeCountryMetricStateSchema,
 	PackedHealthCheckMetricStateSchema,
 	PackedHostnameHttpMetricStateSchema,
+	PackedLoadBalancerMetricStateSchema,
 	PackedLbWeightMetricStateSchema,
 	PackedLogpushZoneMetricStateSchema,
 	PackedOriginStatusMetricStateSchema,
@@ -163,6 +170,17 @@ export function packedMetricScopes(state: PackedMetricState): string[] {
 						zone.statusRows.length > 0 ||
 						zone.cacheRows.length > 0 ||
 						zone.latencyRows.length > 0,
+				)
+				.map((zone) => zone.zone);
+		case LOAD_BALANCER_METRICS_QUERY_NAME:
+			return state.zones
+				.filter(
+					(zone) =>
+						zone.requestRows.length > 0 ||
+						zone.rttRows.length > 0 ||
+						zone.originsSelectedRows.length > 0 ||
+						zone.policyRows.length > 0 ||
+						zone.poolHealthRows.length > 0,
 				)
 				.map((zone) => zone.zone);
 		default:
@@ -568,6 +586,23 @@ export function accumulatePackedMetricStateWithCounters(
 							? input.previous
 							: undefined,
 						input.metrics,
+						input.failedScopes,
+					),
+				},
+				counters: noCounters,
+			};
+		case LOAD_BALANCER_METRICS_QUERY_NAME:
+			return {
+				state: {
+					...envelope,
+					format: "load-balancer-packed-by-zone-v1",
+					queryName: LOAD_BALANCER_METRICS_QUERY_NAME,
+					zones: accumulatePackedLoadBalancerRows(
+						input.previous?.queryName === LOAD_BALANCER_METRICS_QUERY_NAME
+							? input.previous
+							: undefined,
+						input.metrics,
+						input.ingestId,
 						input.failedScopes,
 					),
 				},

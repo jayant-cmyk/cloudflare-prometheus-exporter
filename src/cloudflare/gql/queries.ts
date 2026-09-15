@@ -4,8 +4,9 @@ export const HTTPMetricsQuery = graphql(`
   query HTTPMetrics(
     $zoneIDs: [string!]
     $mintime: Time!
-    $maxtime: Time!
-    $limit: uint64!
+		$maxtime: Time!
+		$limit: uint64!
+		$packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -17,7 +18,7 @@ export const HTTPMetricsQuery = graphql(`
           uniq {
             uniques
           }
-          sum {
+				sum {
             browserMap {
               pageViews
               uaBrowserFamily
@@ -57,15 +58,15 @@ export const HTTPMetricsQuery = graphql(`
               clientSSLProtocol
               requests
             }
-            ipClassMap {
+					ipClassMap {
               ipType
               requests
-            }
-          }
-          dimensions {
-            datetime
-          }
-        }
+					}
+				}
+				dimensions {
+					datetime @skip(if: $packed)
+				}
+			}
         firewallEventsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -90,8 +91,9 @@ export const HTTPMetricsQueryNoBots = graphql(`
   query HTTPMetricsNoBots(
     $zoneIDs: [string!]
     $mintime: Time!
-    $maxtime: Time!
-    $limit: uint64!
+		$maxtime: Time!
+		$limit: uint64!
+		$packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -103,7 +105,7 @@ export const HTTPMetricsQueryNoBots = graphql(`
           uniq {
             uniques
           }
-          sum {
+				sum {
             browserMap {
               pageViews
               uaBrowserFamily
@@ -143,15 +145,15 @@ export const HTTPMetricsQueryNoBots = graphql(`
               clientSSLProtocol
               requests
             }
-            ipClassMap {
+					ipClassMap {
               ipType
               requests
-            }
-          }
-          dimensions {
-            datetime
-          }
-        }
+					}
+				}
+				dimensions {
+					datetime @skip(if: $packed)
+				}
+			}
         firewallEventsAdaptiveGroups(
           limit: $limit
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
@@ -458,28 +460,71 @@ export const LoadBalancerMetricsQuery = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
+	$packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
         zoneTag
-        loadBalancingRequestsAdaptiveGroups(
-          filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
-          limit: $limit
-        ) {
+		loadBalancingRequestsAdaptiveGroups(
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+			limit: $limit
+		) @skip(if: $packed) {
+			count
+			dimensions {
+				region
+				lbName
+				selectedPoolName
+				selectedOriginName
+				selectedPoolAvgRttMs
+				proxied
+				steeringPolicy
+				numberOriginsSelected
+			}
+		}
+		poolRequests: loadBalancingRequestsAdaptiveGroups(
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+			limit: $limit
+		) @include(if: $packed) {
           count
           dimensions {
-            lbName
-            selectedPoolName
-            selectedOriginName
-            region
-            proxied
-            selectedPoolAvgRttMs
-            selectedPoolHealthy
-            steeringPolicy
-            numberOriginsSelected
-          }
-        }
-        loadBalancingRequestsAdaptive(
+				lbName
+				selectedPoolName
+				selectedOriginName
+			}
+		}
+		poolRtt: loadBalancingRequestsAdaptiveGroups(
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+			limit: $limit
+		) @include(if: $packed) {
+			count
+			dimensions {
+				lbName
+				selectedPoolName
+				selectedPoolAvgRttMs
+			}
+		}
+		originsSelected: loadBalancingRequestsAdaptiveGroups(
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+			limit: $limit
+		) @include(if: $packed) {
+			count
+			dimensions {
+				lbName
+				selectedPoolName
+				numberOriginsSelected
+			}
+		}
+		steeringPolicies: loadBalancingRequestsAdaptiveGroups(
+			filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
+			limit: $limit
+		) @include(if: $packed) {
+			count
+			dimensions {
+				lbName
+				steeringPolicy
+			}
+		}
+		loadBalancingRequestsAdaptive(
           filter: { datetime_geq: $mintime, datetime_lt: $maxtime }
           limit: $limit
         ) {

@@ -65,6 +65,7 @@ describe("packed metric state facade", () => {
 			"edge-country-metrics",
 			"health-check-metrics",
 			"hostname-http-metrics",
+			"load-balancer-metrics",
 			"lb-weight-metrics",
 			"logpush-zone",
 			"origin-status-metrics",

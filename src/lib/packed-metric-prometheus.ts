@@ -38,6 +38,11 @@ import {
 	LB_WEIGHT_METRICS_QUERY_NAME,
 	type PackedLbWeightMetricState,
 } from "./packed-lb-weight-state";
+import {
+	LOAD_BALANCER_METRICS_QUERY_NAME,
+	type PackedLoadBalancerMetricState,
+	serializePackedLoadBalancerMetrics,
+} from "./packed-load-balancer";
 import { serializePackedLogpushZoneMetrics } from "./packed-logpush-zone-prometheus";
 import {
 	LOGPUSH_ZONE_METRICS_QUERY_NAME,
@@ -77,6 +82,7 @@ export function* serializePackedMetrics(
 	const edgeCountryStates: PackedEdgeCountryMetricState[] = [];
 	const healthCheckStates: PackedHealthCheckMetricState[] = [];
 	const hostnameHttpStates: PackedHostnameHttpMetricState[] = [];
+	const loadBalancerStates: PackedLoadBalancerMetricState[] = [];
 	const lbWeightStates: PackedLbWeightMetricState[] = [];
 	const logpushZoneStates: PackedLogpushZoneMetricState[] = [];
 	const originStatusStates: PackedOriginStatusMetricState[] = [];
@@ -105,6 +111,9 @@ export function* serializePackedMetrics(
 			case HOSTNAME_HTTP_METRICS_QUERY_NAME:
 				hostnameHttpStates.push(state);
 				break;
+			case LOAD_BALANCER_METRICS_QUERY_NAME:
+				loadBalancerStates.push(state);
+				break;
 			case LB_WEIGHT_METRICS_QUERY_NAME:
 				lbWeightStates.push(state);
 				break;
@@ -130,6 +139,7 @@ export function* serializePackedMetrics(
 	yield* serializePackedEdgeCountryMetrics(edgeCountryStates, options);
 	yield* serializePackedHealthCheckMetrics(healthCheckStates, options);
 	yield* serializePackedHostnameHttpMetrics(hostnameHttpStates, options);
+	yield* serializePackedLoadBalancerMetrics(loadBalancerStates, options);
 	yield* serializePackedLbWeightMetrics(lbWeightStates, options);
 	yield* serializePackedLogpushZoneMetrics(logpushZoneStates, options);
 	yield* serializePackedOriginStatusMetrics(originStatusStates, options);

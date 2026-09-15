@@ -15,6 +15,85 @@ function createClient(fetch: typeof globalThis.fetch): CloudflareMetricsClient {
 }
 
 describe("CloudflareMetricsClient", () => {
+	it("preserves the legacy HTTP query shape when packed storage is disabled", async () => {
+		const client = createClient(async (input, init) => {
+			const body = z
+				.object({
+					query: z.string(),
+					variables: z.object({ packed: z.boolean() }),
+				})
+				.parse(await new Request(input, init).json());
+			expect(body.variables.packed).toBe(false);
+			expect(body.query).toContain("datetime @skip(if: $packed)");
+			return Response.json({ data: { viewer: { zones: [] } } });
+		});
+
+		await client.getZoneMetrics(
+			"http-metrics",
+			["zone-id"],
+			[],
+			{},
+			{ mintime: "2026-01-01T00:00:00Z", maxtime: "2026-01-01T00:01:00Z" },
+		);
+	});
+
+	it("parses the legacy load-balancer response when packed storage is disabled", async () => {
+		const client = createClient(async (input, init) => {
+			const body = z
+				.object({ variables: z.object({ packed: z.boolean() }) })
+				.parse(await new Request(input, init).json());
+			expect(body.variables.packed).toBe(false);
+			return Response.json({
+				data: {
+					viewer: {
+						zones: [
+							{
+								zoneTag: "zone-id",
+								loadBalancingRequestsAdaptiveGroups: [
+									{
+										count: 7,
+										dimensions: {
+											lbName: "lb",
+											selectedPoolName: "pool",
+											selectedOriginName: "origin",
+											selectedPoolAvgRttMs: 250,
+											numberOriginsSelected: 2,
+											steeringPolicy: "dynamic_latency",
+										},
+									},
+								],
+								loadBalancingRequestsAdaptive: [],
+							},
+						],
+					},
+				},
+			});
+		});
+
+		const metrics = await client.getZoneMetrics(
+			"load-balancer-metrics",
+			["zone-id"],
+			[
+				{
+					id: "zone-id",
+					name: "example.com",
+					status: "active",
+					plan: { id: "paid", name: "Paid" },
+					account: { id: "account-id", name: "Account" },
+				},
+			],
+			{},
+			{ mintime: "2026-01-01T00:00:00Z", maxtime: "2026-01-01T00:01:00Z" },
+		);
+
+		expect(metrics.map((metric) => metric.name)).toEqual([
+			"cloudflare_zone_pool_requests_total",
+			"cloudflare_zone_lb_pool_rtt_seconds",
+			"cloudflare_zone_lb_steering_policy_info",
+			"cloudflare_zone_lb_origins_selected_count",
+		]);
+	});
+
 	it.each([
 		false,
 		true,

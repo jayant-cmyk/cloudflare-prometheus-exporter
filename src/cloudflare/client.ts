@@ -240,6 +240,7 @@ export class CloudflareMetricsClient {
 			limit: input.limit,
 			maxtime: input.maxtime.toISOString(),
 			mintime: input.mintime.toISOString(),
+			packed: false,
 			zoneIDs: input.zoneIds,
 		});
 
@@ -1516,6 +1517,7 @@ export class CloudflareMetricsClient {
 					firewallMap,
 					timeRange,
 					httpStatusGroup,
+					packedMetricStorage,
 				);
 			case "adaptive-metrics":
 				return this.getAdaptiveMetrics(zoneIds, zones, timeRange);
@@ -1535,7 +1537,12 @@ export class CloudflareMetricsClient {
 			case "health-check-metrics":
 				return this.getHealthCheckMetrics(zoneIds, zones, timeRange);
 			case "load-balancer-metrics":
-				return this.getLoadBalancerMetrics(zoneIds, zones, timeRange);
+				return this.getLoadBalancerMetrics(
+					zoneIds,
+					zones,
+					timeRange,
+					packedMetricStorage,
+				);
 			case "logpush-zone":
 				return this.getLogpushZoneMetrics(zoneIds, zones, timeRange);
 			case "origin-status-metrics":
@@ -1579,12 +1586,14 @@ export class CloudflareMetricsClient {
 		firewallRules: Map<string, string>,
 		timeRange: TimeRange,
 		httpStatusGroup: boolean,
+		packedMetricStorage: boolean,
 	): Promise<MetricDefinition[]> {
 		const queryVars = {
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
+			packed: packedMetricStorage,
 		};
 
 		let result = await this.gql.query(HTTPMetricsQuery, queryVars);
@@ -2842,12 +2851,14 @@ export class CloudflareMetricsClient {
 		zoneIds: string[],
 		zones: Zone[],
 		timeRange: TimeRange,
+		packedMetricStorage: boolean,
 	): Promise<MetricDefinition[]> {
 		const result = await this.gql.query(LoadBalancerMetricsQuery, {
 			zoneIDs: zoneIds,
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
+			packed: packedMetricStorage,
 		});
 
 		if (result.error) {
@@ -2895,7 +2906,6 @@ export class CloudflareMetricsClient {
 		for (const zoneData of result.data?.viewer?.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
-			// Pool requests, RTT, steering policy, origins selected from groups
 			for (const group of zoneData.loadBalancingRequestsAdaptiveGroups ?? []) {
 				const dim = group.dimensions;
 				if (group.count != null && group.count > 0) {
@@ -2908,8 +2918,6 @@ export class CloudflareMetricsClient {
 						},
 						value: group.count,
 					});
-
-					// Pool RTT - convert milliseconds to seconds
 					if (
 						dim?.selectedPoolAvgRttMs != null &&
 						dim.selectedPoolAvgRttMs > 0
@@ -2917,38 +2925,109 @@ export class CloudflareMetricsClient {
 						poolRtt.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: dim?.lbName ?? "",
-								pool_name: dim?.selectedPoolName ?? "",
+								lb_name: dim.lbName ?? "",
+								pool_name: dim.selectedPoolName ?? "",
 							},
 							value: dim.selectedPoolAvgRttMs / 1000,
 						});
 					}
-
-					// Origins selected count
 					if (dim?.numberOriginsSelected != null) {
 						originsSelectedCount.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: dim?.lbName ?? "",
-								pool_name: dim?.selectedPoolName ?? "",
+								lb_name: dim.lbName ?? "",
+								pool_name: dim.selectedPoolName ?? "",
 							},
 							value: dim.numberOriginsSelected,
 						});
 					}
-
-					// Steering policy info (dedupe by zone:lb_name)
-					const policyKey = `${zoneName}:${dim?.lbName}`;
-					if (!seenPolicies.has(policyKey) && dim?.steeringPolicy) {
+					const lbName = dim?.lbName ?? "";
+					const policyKey = `${zoneName}\x00${lbName}`;
+					if (dim?.steeringPolicy && !seenPolicies.has(policyKey)) {
 						seenPolicies.add(policyKey);
 						steeringPolicyInfo.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: dim?.lbName ?? "",
+								lb_name: lbName,
 								policy: dim.steeringPolicy,
 							},
 							value: 1,
 						});
 					}
+				}
+			}
+
+			for (const group of zoneData.poolRequests ?? []) {
+				const dim = group.dimensions;
+				if (group.count != null && group.count > 0) {
+					poolRequests.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim?.lbName ?? "",
+							pool_name: dim?.selectedPoolName ?? "",
+							origin_name: dim?.selectedOriginName ?? "",
+						},
+						value: group.count,
+					});
+				}
+			}
+
+			for (const group of zoneData.poolRtt ?? []) {
+				const dim = group.dimensions;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.selectedPoolAvgRttMs != null &&
+					dim.selectedPoolAvgRttMs > 0
+				) {
+					poolRtt.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim.lbName ?? "",
+							pool_name: dim.selectedPoolName ?? "",
+						},
+						value: dim.selectedPoolAvgRttMs / 1000,
+					});
+				}
+			}
+
+			for (const group of zoneData.originsSelected ?? []) {
+				const dim = group.dimensions;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.numberOriginsSelected != null
+				) {
+					originsSelectedCount.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: dim.lbName ?? "",
+							pool_name: dim.selectedPoolName ?? "",
+						},
+						value: dim.numberOriginsSelected,
+					});
+				}
+			}
+
+			for (const group of zoneData.steeringPolicies ?? []) {
+				const dim = group.dimensions;
+				const lbName = dim?.lbName ?? "";
+				const policyKey = `${zoneName}\x00${lbName}`;
+				if (
+					group.count != null &&
+					group.count > 0 &&
+					dim?.steeringPolicy &&
+					!seenPolicies.has(policyKey)
+				) {
+					seenPolicies.add(policyKey);
+					steeringPolicyInfo.values.push({
+						labels: {
+							zone: zoneName,
+							lb_name: lbName,
+							policy: dim.steeringPolicy,
+						},
+						value: 1,
+					});
 				}
 			}
 
