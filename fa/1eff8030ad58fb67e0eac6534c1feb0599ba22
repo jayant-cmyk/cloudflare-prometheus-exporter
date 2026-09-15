@@ -1,0 +1,29 @@
+src/cloudflare/client.ts
+  s_faa18202457d53::t_f345e739479627 14-24,622-673,2278-2279,2284-2285,2290-2291,2296-2297,2302-2307,2309-2312,2314-2321,2323-2327,2331,2334-2335
+src/durable-objects/MetricExporter.ts
+  s_faa18202457d53::t_e1e4424f29bf59 29-35,529-530,725-727,737-756,855,864-867,880-888,967-982,1202-1238
+src/lib/packed-adaptive-prometheus.test.ts
+  s_faa18202457d53::t_c2b34537196278 1-171
+src/lib/packed-adaptive-prometheus.ts
+  s_faa18202457d53::t_92608828fa95b1 1-63
+src/lib/packed-adaptive-state.ts
+  s_faa18202457d53::t_bc55b4709aa861 1-253
+test/integration/adaptive-metrics.test.ts
+  s_faa18202457d53::t_064f68f2e9a80f 1-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fa1eff8030ad58fb67e0eac6534c1feb0599ba22",
+  "prompts": {},
+  "sessions": {
+    "s_faa18202457d53": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5f3fdb01ffe9qAbM0EKERoVPX",
+        "model": "gpt-5.4"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
