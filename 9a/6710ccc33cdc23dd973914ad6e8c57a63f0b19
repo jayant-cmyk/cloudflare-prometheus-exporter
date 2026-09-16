@@ -1,0 +1,25 @@
+src/cloudflare/client.ts
+  s_8484591372c681::t_b479831c9d0f43 5,15,1508,1524,1527-1532,1534-1539,1546,1549-1554,1556-1561,1563-1568,1575,1578-1583,1585-1590,1592-1597,1605,1608,1610,1618-1643,1663,1854-1879,2134,2171-2176,2247,2273,2338,2372,2419,2450,2498,2517,2551,2604-2611,2710,2810-2820,2995,3043-3049,3225,3244,3280,3299,3339,3362,3471-3474,3481,3519,3527
+src/durable-objects/MetricExporter.ts
+  s_8484591372c681::t_c90ab3c4b7d5df 25,89,416-444,449-453,456,475,674-691,711,741-769,805-809,873
+src/lib/columnar-observations.ts
+  s_8484591372c681::t_e644d7aba6672d 1-117
+src/lib/packed-metric-state.ts
+  s_8484591372c681::t_57e268f6aa9c55 5,27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9a6710ccc33cdc23dd973914ad6e8c57a63f0b19",
+  "prompts": {},
+  "sessions": {
+    "s_8484591372c681": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f54d80c75ffez4Uvn8qq50loRP",
+        "model": "@cf/zai-org/glm-5.3-flash"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
