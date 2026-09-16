@@ -1,8 +1,8 @@
-import type { MetricDefinition } from "./metrics";
 import {
 	accumulateColumnarMetricState,
 	COLUMNAR_METRIC_QUERIES,
 	type ColumnarMetricQuery,
+	type ColumnarMetricSource,
 	isColumnarMetricQuery,
 	PackedColumnarMetricStateSchema,
 } from "./packed-columnar-metric";
@@ -24,7 +24,7 @@ export function isPackedMetricQuery(query: string): query is PackedMetricQuery {
 
 type AccumulateInput = {
 	previous: PackedMetricState | undefined;
-	metrics: MetricDefinition[];
+	metrics: readonly ColumnarMetricSource[];
 	ingestId: number;
 	failedScopes: ReadonlySet<string>;
 };

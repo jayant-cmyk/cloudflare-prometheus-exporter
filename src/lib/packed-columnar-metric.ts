@@ -1,5 +1,5 @@
 import { type RefinementCtx, z } from "zod";
-import type { MetricDefinition } from "./metrics";
+import type { MetricDefinition, MetricValue } from "./metrics";
 import {
 	type ColumnarFamily,
 	type ColumnarSampleSource,
@@ -25,6 +25,10 @@ export const COLUMNAR_METRIC_QUERIES = [
 ] as const;
 
 export type ColumnarMetricQuery = (typeof COLUMNAR_METRIC_QUERIES)[number];
+
+export type ColumnarMetricSource = Omit<MetricDefinition, "values"> & {
+	values: Iterable<MetricValue>;
+};
 
 const FamilyMetadataSchema = z.object({
 	name: z.string(),
@@ -225,7 +229,7 @@ function rowKey(labels: readonly string[]) {
 	return JSON.stringify(labels);
 }
 
-function metricLabels(metric: MetricDefinition): string[] {
+function metricLabels(metric: ColumnarMetricSource): string[] {
 	const labels = new Set<string>();
 	for (const sample of metric.values) {
 		for (const label of Object.keys(sample.labels)) {
@@ -237,7 +241,7 @@ function metricLabels(metric: MetricDefinition): string[] {
 
 function collectFamilies(
 	previous: PackedColumnarMetricState | undefined,
-	metrics: readonly MetricDefinition[],
+	metrics: readonly ColumnarMetricSource[],
 ): FamilyMetadata[] {
 	const families = previous?.families.map((family) => ({ ...family })) ?? [];
 	const indexes = new Map(
@@ -262,7 +266,7 @@ function collectFamilies(
 
 function collectFamilyLabels(
 	previous: PackedColumnarMetricState | undefined,
-	metrics: readonly MetricDefinition[],
+	metrics: readonly ColumnarMetricSource[],
 	families: readonly FamilyMetadata[],
 ): Map<number, string[]> {
 	const labelsByFamily = new Map<number, string[]>();
@@ -306,7 +310,7 @@ function storedRows(
 }
 
 function observedRowsByZone(
-	metrics: readonly MetricDefinition[],
+	metrics: readonly ColumnarMetricSource[],
 	families: readonly FamilyMetadata[],
 	labelsByFamily: ReadonlyMap<number, readonly string[]>,
 ): Map<string, Map<number, Map<string, Row>>> {
@@ -441,7 +445,7 @@ function shareIdenticalLabels(
 
 export function accumulateColumnarMetricState(input: {
 	previous: PackedColumnarMetricState | undefined;
-	metrics: readonly MetricDefinition[];
+	metrics: readonly ColumnarMetricSource[];
 	ingestId: number;
 	failedScopes: ReadonlySet<string>;
 }): PackedColumnarMetricState {
