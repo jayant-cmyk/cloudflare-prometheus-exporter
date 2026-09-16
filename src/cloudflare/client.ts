@@ -2510,30 +2510,36 @@ export class CloudflareMetricsClient {
 					totalEvents += group.count;
 					groupCount++;
 
+					// Timing metrics
 					const baseLabels = {
 						zone: zoneName,
 						origin_ip: dim?.originIP ?? "",
 						fqdn: dim?.fqdn ?? "",
 					};
+
 					if (avg?.rttMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckRtt.values.push({
 							labels: baseLabels,
 							value: avg.rttMs / 1000,
 						});
 					}
 					if (avg?.timeToFirstByteMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTtfb.values.push({
 							labels: baseLabels,
 							value: avg.timeToFirstByteMs / 1000,
 						});
 					}
 					if (avg?.tcpConnMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTcpConn.values.push({
 							labels: baseLabels,
 							value: avg.tcpConnMs / 1000,
 						});
 					}
 					if (avg?.tlsHandshakeMs != null) {
+						// Convert milliseconds to seconds
 						healthCheckTlsHandshake.values.push({
 							labels: baseLabels,
 							value: avg.tlsHandshakeMs / 1000,
@@ -2904,6 +2910,7 @@ export class CloudflareMetricsClient {
 		for (const zoneData of result.data?.viewer?.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
 
+			// Pool requests, RTT, steering policy, origins selected from groups
 			for (const group of zoneData.loadBalancingRequestsAdaptiveGroups ?? []) {
 				const dim = group.dimensions;
 				if (group.count != null && group.count > 0) {
@@ -2916,6 +2923,8 @@ export class CloudflareMetricsClient {
 						},
 						value: group.count,
 					});
+
+					// Pool RTT - convert milliseconds to seconds
 					if (
 						dim?.selectedPoolAvgRttMs != null &&
 						dim.selectedPoolAvgRttMs > 0
@@ -2923,30 +2932,33 @@ export class CloudflareMetricsClient {
 						poolRtt.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: dim.lbName ?? "",
-								pool_name: dim.selectedPoolName ?? "",
+								lb_name: dim?.lbName ?? "",
+								pool_name: dim?.selectedPoolName ?? "",
 							},
 							value: dim.selectedPoolAvgRttMs / 1000,
 						});
 					}
+
+					// Origins selected count
 					if (dim?.numberOriginsSelected != null) {
 						originsSelectedCount.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: dim.lbName ?? "",
-								pool_name: dim.selectedPoolName ?? "",
+								lb_name: dim?.lbName ?? "",
+								pool_name: dim?.selectedPoolName ?? "",
 							},
 							value: dim.numberOriginsSelected,
 						});
 					}
-					const lbName = dim?.lbName ?? "";
-					const policyKey = `${zoneName}\x00${lbName}`;
-					if (dim?.steeringPolicy && !seenPolicies.has(policyKey)) {
+
+					// Steering policy info (dedupe by zone:lb_name)
+					const policyKey = `${zoneName}:${dim?.lbName}`;
+					if (!seenPolicies.has(policyKey) && dim?.steeringPolicy) {
 						seenPolicies.add(policyKey);
 						steeringPolicyInfo.values.push({
 							labels: {
 								zone: zoneName,
-								lb_name: lbName,
+								lb_name: dim?.lbName ?? "",
 								policy: dim.steeringPolicy,
 							},
 							value: 1,

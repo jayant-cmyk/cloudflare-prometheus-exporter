@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { type RefinementCtx, z } from "zod";
 import type { MetricDefinition } from "./metrics";
 import {
 	type ColumnarFamily,
@@ -48,102 +48,137 @@ const ZoneColumnsSchema = z.object({
 	families: z.array(FamilyColumnsSchema),
 });
 
-export const PackedColumnarMetricStateSchema = z
-	.object({
-		format: z.literal("metric-columnar-v1"),
-		lastIngest: z.number(),
-		families: z.array(FamilyMetadataSchema),
-		zones: z.array(ZoneColumnsSchema),
-	})
-	.superRefine((state, ctx) => {
-		const familyNames = new Set<string>();
-		for (const [index, family] of state.families.entries()) {
-			if (familyNames.has(family.name)) {
-				ctx.addIssue({
-					code: "custom",
-					path: ["families", index, "name"],
-					message: "Duplicate metric family",
-				});
-			}
-			familyNames.add(family.name);
-		}
+const PackedColumnarMetricStateBaseSchema = z.object({
+	format: z.literal("metric-columnar-v1"),
+	lastIngest: z.number(),
+	families: z.array(FamilyMetadataSchema),
+	zones: z.array(ZoneColumnsSchema),
+});
 
-		const zoneNames = new Set<string>();
-		for (const [zoneIndex, zone] of state.zones.entries()) {
-			if (zoneNames.has(zone.zone)) {
-				ctx.addIssue({
-					code: "custom",
-					path: ["zones", zoneIndex, "zone"],
-					message: "Duplicate zone",
-				});
-			}
-			zoneNames.add(zone.zone);
-			const familyIndexes = new Set<number>();
-			for (const [tableIndex, table] of zone.families.entries()) {
-				const path = ["zones", zoneIndex, "families", tableIndex];
-				const family = state.families[table.family];
-				if (family === undefined || familyIndexes.has(table.family)) {
-					ctx.addIssue({
-						code: "custom",
-						path: [...path, "family"],
-						message: "Invalid or duplicate family index",
-					});
-					continue;
-				}
-				familyIndexes.add(table.family);
-				if (
-					Object.values(table.labels).some(
-						(column) => column.length !== table.values.length,
-					)
-				) {
-					ctx.addIssue({
-						code: "custom",
-						path: [...path, "labels"],
-						message: "Packed columns must have equal lengths",
-					});
-				}
-				const rowKeys = new Set<string>();
-				const labelNames = Object.keys(table.labels);
-				for (let rowIndex = 0; rowIndex < table.values.length; rowIndex++) {
-					const key = rowKey(
-						labelNames.map((label) => table.labels[label]?.[rowIndex] ?? ""),
-					);
-					if (rowKeys.has(key)) {
-						ctx.addIssue({
-							code: "custom",
-							path: [...path, "values", rowIndex],
-							message: "Duplicate label tuple",
-						});
-					}
-					rowKeys.add(key);
-				}
-				if (
-					family.type === "counter" &&
-					(table.counter === undefined ||
-						table.counter.misses.length !== table.values.length ||
-						table.counter.lastIngest.length !== table.values.length)
-				) {
-					ctx.addIssue({
-						code: "custom",
-						path: [...path, "counter"],
-						message: "Counter columns must match values",
-					});
-				}
-				if (family.type === "gauge" && table.counter !== undefined) {
-					ctx.addIssue({
-						code: "custom",
-						path: [...path, "counter"],
-						message: "Gauge families cannot have counter columns",
-					});
-				}
-			}
+type PackedColumnarMetricStateValue = z.infer<
+	typeof PackedColumnarMetricStateBaseSchema
+>;
+type FamilyMetadata = z.infer<typeof FamilyMetadataSchema>;
+type FamilyColumns = z.infer<typeof FamilyColumnsSchema>;
+type ValidationContext = RefinementCtx<PackedColumnarMetricStateValue>;
+
+function addValidationIssue(
+	ctx: ValidationContext,
+	path: (string | number)[],
+	message: string,
+) {
+	ctx.addIssue({ code: "custom", path, message });
+}
+
+function validateFamilyNames(
+	families: readonly FamilyMetadata[],
+	ctx: ValidationContext,
+) {
+	const names = new Set<string>();
+	for (const [index, family] of families.entries()) {
+		if (names.has(family.name)) {
+			addValidationIssue(
+				ctx,
+				["families", index, "name"],
+				"Duplicate metric family",
+			);
 		}
+		names.add(family.name);
+	}
+}
+
+function validateFamilyTable(
+	family: FamilyMetadata,
+	table: FamilyColumns,
+	path: (string | number)[],
+	ctx: ValidationContext,
+) {
+	if (
+		Object.values(table.labels).some(
+			(column) => column.length !== table.values.length,
+		)
+	) {
+		addValidationIssue(
+			ctx,
+			[...path, "labels"],
+			"Packed columns must have equal lengths",
+		);
+	}
+
+	const rowKeys = new Set<string>();
+	const labelNames = Object.keys(table.labels);
+	for (let rowIndex = 0; rowIndex < table.values.length; rowIndex++) {
+		const key = rowKey(
+			labelNames.map((label) => table.labels[label]?.[rowIndex] ?? ""),
+		);
+		if (rowKeys.has(key)) {
+			addValidationIssue(
+				ctx,
+				[...path, "values", rowIndex],
+				"Duplicate label tuple",
+			);
+		}
+		rowKeys.add(key);
+	}
+
+	const counterColumnsMatch =
+		table.counter !== undefined &&
+		table.counter.misses.length === table.values.length &&
+		table.counter.lastIngest.length === table.values.length;
+	if (family.type === "counter" && !counterColumnsMatch) {
+		addValidationIssue(
+			ctx,
+			[...path, "counter"],
+			"Counter columns must match values",
+		);
+	}
+	if (family.type === "gauge" && table.counter !== undefined) {
+		addValidationIssue(
+			ctx,
+			[...path, "counter"],
+			"Gauge families cannot have counter columns",
+		);
+	}
+}
+
+function validateZones(
+	state: PackedColumnarMetricStateValue,
+	ctx: ValidationContext,
+) {
+	const zoneNames = new Set<string>();
+	for (const [zoneIndex, zone] of state.zones.entries()) {
+		if (zoneNames.has(zone.zone)) {
+			addValidationIssue(ctx, ["zones", zoneIndex, "zone"], "Duplicate zone");
+		}
+		zoneNames.add(zone.zone);
+
+		const familyIndexes = new Set<number>();
+		for (const [tableIndex, table] of zone.families.entries()) {
+			const path = ["zones", zoneIndex, "families", tableIndex];
+			const family = state.families[table.family];
+			if (family === undefined || familyIndexes.has(table.family)) {
+				addValidationIssue(
+					ctx,
+					[...path, "family"],
+					"Invalid or duplicate family index",
+				);
+				continue;
+			}
+			familyIndexes.add(table.family);
+			validateFamilyTable(family, table, path, ctx);
+		}
+	}
+}
+
+export const PackedColumnarMetricStateSchema =
+	PackedColumnarMetricStateBaseSchema.superRefine((state, ctx) => {
+		validateFamilyNames(state.families, ctx);
+		validateZones(state, ctx);
 	});
 
 export type PackedColumnarMetricState = z.infer<
 	typeof PackedColumnarMetricStateSchema
 >;
-type FamilyMetadata = PackedColumnarMetricState["families"][number];
 
 type Row = {
 	labels: string[];

@@ -378,7 +378,7 @@ describe("MetricExporter packed colo storage", () => {
 			throw new Error("expected a packed colo snapshot");
 		}
 		expect(
-			snapshot?.zones.reduce((total, zone) => total + zone.misses.length, 0),
+			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
 		).toBe(150_000);
 		const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
 		expect(bytes).toBeLessThan(16 * 1024 * 1024);

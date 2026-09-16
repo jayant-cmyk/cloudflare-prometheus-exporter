@@ -462,12 +462,13 @@ export const LoadBalancerMetricsQuery = graphql(`
         ) @skip(if: $packed) {
           count
           dimensions {
-            region
             lbName
             selectedPoolName
             selectedOriginName
-            selectedPoolAvgRttMs
+            region
             proxied
+            selectedPoolAvgRttMs
+            selectedPoolHealthy
             steeringPolicy
             numberOriginsSelected
           }
