@@ -1,0 +1,19 @@
+test/integration/metric-exporter-helpers.ts
+  s_7035e143a8280c::t_91f4108476ed08 7,11,13-16,18,20-36,38-60,62-67,69-82,88,90-93,95-98,100-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "65fcfebbb55998605e483c4fc191b0463f2598d6",
+  "prompts": {},
+  "sessions": {
+    "s_7035e143a8280c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f55a37b66ffeisSuM44YJBB3Fu",
+        "model": "gpt-5.4"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
