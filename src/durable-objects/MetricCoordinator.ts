@@ -8,7 +8,6 @@ import { serializePackedMetrics } from "../lib/packed-metric-prometheus";
 import {
 	PACKED_METRIC_QUERIES,
 	type PackedMetricState,
-	packedMetricStorageEnabled,
 } from "../lib/packed-metric-state";
 import { serializeToPrometheus } from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
@@ -209,9 +208,9 @@ export class MetricCoordinator extends DurableObject<Env> {
 	): AsyncGenerator<string, void> {
 		const metricsDenylist = parseCommaSeparated(config.metricsDenylist);
 		const excludeLabels = config.excludeHost ? new Set(["host"]) : undefined;
-		const packedMetricQueries = PACKED_METRIC_QUERIES.filter((query) =>
-			packedMetricStorageEnabled(query, config),
-		);
+		const packedMetricQueries = config.packedMetricStorage
+			? PACKED_METRIC_QUERIES
+			: [];
 
 		const errorsByAccount: Map<string, { code: string; count: number }[]> =
 			new Map();

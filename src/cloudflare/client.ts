@@ -1489,7 +1489,7 @@ export class CloudflareMetricsClient {
 	 * @param hostMetricsAllowlist Allowed hostnames for hostname-http-metrics query.
 	 * @param hostMetricsDelaySeconds Ingestion delay override for hostname metrics.
 	 * @param httpStatusGroup Whether to group HTTP response statuses by class.
-	 * @param packedMetricStorage Whether packed storage is enabled, allowing colo-metrics to use its reduced query.
+	 * @param packedMetricStorage Whether packed storage is enabled, allowing reduced query selections.
 	 * @returns Promise of metric definitions for the zones.
 	 * @throws {Error} When unknown query type provided.
 	 */
@@ -2491,8 +2491,9 @@ export class CloudflareMetricsClient {
 			let totalEvents = 0;
 			let groupCount = 0;
 
-			for (const group of zoneData.healthEvents ?? []) {
+			for (const group of zoneData.healthCheckEventsAdaptiveGroups ?? []) {
 				const dim = group.dimensions;
+				const avg = group.avg;
 
 				if (group.count != null && group.count > 0) {
 					eventsOrigin.values.push({
@@ -2508,39 +2509,36 @@ export class CloudflareMetricsClient {
 					});
 					totalEvents += group.count;
 					groupCount++;
-				}
-			}
 
-			for (const group of zoneData.healthTimings ?? []) {
-				const avg = group.avg;
-				const baseLabels = {
-					zone: zoneName,
-					origin_ip: group.dimensions?.originIP ?? "",
-					fqdn: group.dimensions?.fqdn ?? "",
-				};
-				if (avg?.rttMs != null) {
-					healthCheckRtt.values.push({
-						labels: baseLabels,
-						value: avg.rttMs / 1000,
-					});
-				}
-				if (avg?.timeToFirstByteMs != null) {
-					healthCheckTtfb.values.push({
-						labels: baseLabels,
-						value: avg.timeToFirstByteMs / 1000,
-					});
-				}
-				if (avg?.tcpConnMs != null) {
-					healthCheckTcpConn.values.push({
-						labels: baseLabels,
-						value: avg.tcpConnMs / 1000,
-					});
-				}
-				if (avg?.tlsHandshakeMs != null) {
-					healthCheckTlsHandshake.values.push({
-						labels: baseLabels,
-						value: avg.tlsHandshakeMs / 1000,
-					});
+					const baseLabels = {
+						zone: zoneName,
+						origin_ip: dim?.originIP ?? "",
+						fqdn: dim?.fqdn ?? "",
+					};
+					if (avg?.rttMs != null) {
+						healthCheckRtt.values.push({
+							labels: baseLabels,
+							value: avg.rttMs / 1000,
+						});
+					}
+					if (avg?.timeToFirstByteMs != null) {
+						healthCheckTtfb.values.push({
+							labels: baseLabels,
+							value: avg.timeToFirstByteMs / 1000,
+						});
+					}
+					if (avg?.tcpConnMs != null) {
+						healthCheckTcpConn.values.push({
+							labels: baseLabels,
+							value: avg.tcpConnMs / 1000,
+						});
+					}
+					if (avg?.tlsHandshakeMs != null) {
+						healthCheckTlsHandshake.values.push({
+							labels: baseLabels,
+							value: avg.tlsHandshakeMs / 1000,
+						});
+					}
 				}
 			}
 

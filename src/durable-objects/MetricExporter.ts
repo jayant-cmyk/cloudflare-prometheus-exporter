@@ -23,7 +23,7 @@ import {
 	mergeMetricDefinitions,
 } from "../lib/metrics";
 import {
-	accumulatePackedMetricStateWithCounters,
+	accumulatePackedMetricState,
 	isPackedMetricQuery,
 	PACKED_METRIC_STATE_KEY,
 	type PackedMetricQuery,
@@ -33,7 +33,6 @@ import {
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
-	type CounterState,
 	CounterStateSchema,
 	MetricExporterIdSchema,
 	type MetricExporterIdString,
@@ -379,7 +378,7 @@ export class MetricExporter extends DurableObject<Env> {
 			const usePackedStorage =
 				isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
 			const hasCurrentRepresentation = usePackedStorage
-				? (await this.loadPackedMetricState())?.queryName === state.queryName
+				? (await this.loadPackedMetricState()) !== undefined
 				: state.metrics.length > 0;
 			if (
 				state.lastSslFetch > 0 &&
@@ -421,7 +420,7 @@ export class MetricExporter extends DurableObject<Env> {
 			const ingestId = new Date(timeRange.maxtime).getTime();
 			if (isPackedMetricQuery(state.queryName) && config.packedMetricStorage) {
 				const currentState = this.getState();
-				const packedCounters = await this.savePackedMetricState(
+				await this.savePackedMetricState(
 					result.metrics,
 					currentState,
 					state.queryName,
@@ -431,7 +430,7 @@ export class MetricExporter extends DurableObject<Env> {
 				const refreshedState: MetricExporterState = {
 					...currentState,
 					metrics: [],
-					counters: packedCounters,
+					counters: {},
 					lastIngest: ingestId,
 					lastRefresh: Date.now(),
 					lastSslFetch:
@@ -799,25 +798,22 @@ export class MetricExporter extends DurableObject<Env> {
 		queryName: PackedMetricQuery,
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
-	): Promise<Record<string, CounterState>> {
+	): Promise<void> {
 		const previous = await this.loadPackedMetricState();
-		const packed = accumulatePackedMetricStateWithCounters({
+		const packed = accumulatePackedMetricState({
 			queryName,
 			accountId: state.accountId,
 			accountName: state.accountName,
 			previous,
 			metrics,
-			counters: state.counters,
-			lastIngest: state.lastIngest,
 			ingestId,
 			failedScopes,
 		});
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
 			PACKED_METRIC_STATE_KEY,
-			packed.state,
+			packed,
 		);
-		return packed.counters;
 	}
 
 	/** Persist state in bounded storage chunks before publishing it in memory. */

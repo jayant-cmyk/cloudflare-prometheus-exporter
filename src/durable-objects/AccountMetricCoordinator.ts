@@ -16,7 +16,6 @@ import {
 	isPackedMetricQuery,
 	type PackedMetricQuery,
 	type PackedMetricState,
-	packedMetricScopes,
 } from "../lib/packed-metric-state";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
@@ -486,8 +485,8 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			}
 		}
 		for (const packedState of packedMetricStates) {
-			for (const scope of packedMetricScopes(packedState)) {
-				zonesWithMetrics.add(scope);
+			for (const zone of packedState.zones) {
+				zonesWithMetrics.add(zone.zone);
 			}
 		}
 		const processedZones = zonesWithMetrics.size;

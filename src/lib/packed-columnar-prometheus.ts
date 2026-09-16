@@ -1,5 +1,10 @@
-import type { ColumnarFamily } from "./packed-columnar-state";
 import type { SerializeOptions } from "./prometheus";
+
+export type ColumnarFamily = {
+	name: string;
+	help: string;
+	type: "counter" | "gauge";
+};
 
 // UTF-8 uses at most three bytes per UTF-16 code unit. Leave room for a line
 // without constructing a second encoded copy merely to measure every buffer.
@@ -17,9 +22,7 @@ export type ColumnarSample = {
  * Implementations read packed columns directly so a scrape never materializes
  * every row before the response stream consumes it.
  */
-export type ColumnarSampleSource = (
-	valueIndex: number,
-) => Generator<ColumnarSample>;
+export type ColumnarSampleSource = () => Generator<ColumnarSample>;
 
 function formatValue(value: number): string {
 	if (Number.isNaN(value)) return "NaN";
@@ -32,6 +35,10 @@ function escapeLabel(value: string): string {
 		.replace(/\\/g, "\\\\")
 		.replace(/"/g, '\\"')
 		.replace(/\n/g, "\\n");
+}
+
+function escapeHelp(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n");
 }
 
 /**
@@ -86,7 +93,7 @@ function* familyLines(
 		// Emit headers only once a family has a sample, so a fully aged-out
 		// family produces no bare HELP/TYPE block.
 		if (!wroteHeaders) {
-			yield `# HELP ${family.name} ${family.help}\n# TYPE ${family.name} ${metricType}\n`;
+			yield `# HELP ${family.name} ${escapeHelp(family.help)}\n# TYPE ${family.name} ${metricType}\n`;
 			wroteHeaders = true;
 		}
 		yield `${family.name}${formatLabels(sample, keptLabels, includeZone)} ${formatValue(sample.value)}\n`;
@@ -106,10 +113,11 @@ function* familyLines(
  */
 export function* serializeColumnarMetrics(
 	samplesFor: ColumnarSampleSource,
-	families: readonly ColumnarFamily[],
+	family: ColumnarFamily,
 	keyLabels: readonly string[],
 	options: SerializeOptions,
 ): Generator<string> {
+	if (options.denylist?.has(family.name)) return;
 	const excludeLabels = options.excludeLabels ?? new Set<string>();
 	const includeZone = !excludeLabels.has("zone");
 	const keptIndexes = keyLabels
@@ -120,27 +128,19 @@ export function* serializeColumnarMetrics(
 		!includeZone || keptIndexes.length !== keyLabels.length;
 
 	let buffer = "";
-	for (const family of families) {
-		if (options.denylist?.has(family.name)) continue;
-		const samples = samplesFor(family.valueIndex);
-		for (const line of familyLines(
-			needsAggregation
-				? aggregateSamples(
-						samples,
-						keptIndexes,
-						includeZone,
-						family.type ?? "counter",
-					)
-				: samples,
-			family,
-			keptLabels,
-			includeZone,
-		)) {
-			buffer += line;
-			if (buffer.length >= CHUNK_TARGET_CHARS) {
-				yield buffer;
-				buffer = "";
-			}
+	const samples = samplesFor();
+	for (const line of familyLines(
+		needsAggregation
+			? aggregateSamples(samples, keptIndexes, includeZone, family.type)
+			: samples,
+		family,
+		keptLabels,
+		includeZone,
+	)) {
+		buffer += line;
+		if (buffer.length >= CHUNK_TARGET_CHARS) {
+			yield buffer;
+			buffer = "";
 		}
 	}
 	if (buffer.length > 0) yield buffer;

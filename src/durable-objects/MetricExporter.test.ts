@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { getCloudflareMetricsClient } from "../cloudflare/client";
+import { PackedColumnarMetricStateSchema } from "../lib/packed-columnar-metric";
 import { MetricExporter } from "./MetricExporter";
 
 class AlarmStorage {
@@ -311,7 +311,7 @@ async function createColoHarness(zoneCount = 1) {
 		},
 		async requests() {
 			const packed = await exporter.exportPackedMetrics();
-			if (packed !== undefined && packed.queryName !== "colo-metrics") {
+			if (packed !== undefined && packed.format !== "colo-packed-by-zone-v2") {
 				throw new Error("expected a packed colo snapshot");
 			}
 			return packed?.zones[0]?.requests;
@@ -341,13 +341,16 @@ describe("MetricExporter packed colo storage", () => {
 		await h.refresh(2);
 		await h.refresh(2);
 		const snapshot = await h.exporter.exportPackedMetrics();
-		if (snapshot !== undefined && snapshot.queryName !== "colo-metrics") {
+		if (
+			snapshot !== undefined &&
+			snapshot.format !== "colo-packed-by-zone-v2"
+		) {
 			throw new Error("expected a packed colo snapshot");
 		}
 		expect(snapshot?.zones[0]?.misses).toEqual([4]);
 		for (let minute = 3; minute <= 6; minute++) await h.refresh(minute);
 		const expired = await h.exporter.exportPackedMetrics();
-		if (expired !== undefined && expired.queryName !== "colo-metrics") {
+		if (expired !== undefined && expired.format !== "colo-packed-by-zone-v2") {
 			throw new Error("expected a packed colo snapshot");
 		}
 		expect(expired?.zones).toEqual([]);
@@ -368,7 +371,10 @@ describe("MetricExporter packed colo storage", () => {
 		await h.restart();
 		expect(h.storage.values.get("state")).toMatchObject({ lastError: null });
 		const snapshot = await h.exporter.exportPackedMetrics();
-		if (snapshot !== undefined && snapshot.queryName !== "colo-metrics") {
+		if (
+			snapshot !== undefined &&
+			snapshot.format !== "colo-packed-by-zone-v2"
+		) {
 			throw new Error("expected a packed colo snapshot");
 		}
 		expect(
@@ -400,341 +406,21 @@ describe("MetricExporter packed colo storage", () => {
 	});
 });
 
-// Exercise the real refresh, storage codec, and GraphQL translation for the
-// origin-status packed path; only the platform boundary and upstream HTTP
-// response are replaced by local fixtures.
-async function createOriginStatusHarness() {
+async function createColumnarHarness(packed: boolean) {
 	const storage = new AlarmStorage();
-	const zone = {
-		id: "zone-id",
-		name: "example.com",
-		status: "active",
-		plan: { id: "paid", name: "Paid" },
-		account: { id: "account-id", name: "Account" },
-	};
-	storage.values.set("state", {
-		...storedState(),
-		queryName: "origin-status-metrics",
-		zones: [zone],
-	});
-	let packed = false;
-	let observations = [
-		{ status: 200, country: "US", host: "a.example.com", count: 10 },
-	];
-	vi.stubGlobal("fetch", async () => {
-		return new Response(
-			JSON.stringify({
-				data: {
-					viewer: {
-						zones: [
-							{
-								zoneTag: zone.id,
-								httpRequestsAdaptiveGroups: observations.map((row) => ({
-									dimensions: {
-										originResponseStatus: row.status,
-										clientCountryName: row.country,
-										clientRequestHTTPHost: row.host,
-									},
-									count: row.count,
-								})),
-							},
-						],
-					},
-				},
-			}),
-			{ headers: { "content-type": "application/json" } },
-		);
-	});
-	vi.spyOn(console, "log").mockImplementation(() => {});
-	const env = {
-		CLOUDFLARE_API_TOKEN: "test-token",
-		CONFIG_KV: {
-			get: async () => JSON.stringify({ packedMetricStorage: packed }),
-		},
-		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
-	};
-	let { exporter, ready } = createExporter(storage, env);
-	await ready;
-	return {
-		storage,
-		get exporter() {
-			return exporter;
-		},
-		setPacked(enabled: boolean) {
-			packed = enabled;
-		},
-		setObservations(rows: typeof observations) {
-			observations = rows;
-		},
-		async restart() {
-			({ exporter, ready } = createExporter(storage, env));
-			await ready;
-		},
-		async refresh(minute: number) {
-			await exporter.triggerRefresh({
-				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
-				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
-			});
-		},
-		async snapshot() {
-			const state = await exporter.exportPackedMetrics();
-			if (state !== undefined && state.queryName !== "origin-status-metrics") {
-				throw new Error("expected a packed origin status snapshot");
-			}
-			return state;
-		},
-	};
-}
-
-describe("MetricExporter packed origin status storage", () => {
-	it("stores one row per status, country and host", async () => {
-		const h = await createOriginStatusHarness();
-		h.setPacked(true);
-		h.setObservations([
-			{ status: 200, country: "US", host: "a.example.com", count: 1 },
-			{ status: 502, country: "DE", host: "b.example.com", count: 2 },
-		]);
-		await h.refresh(1);
-
-		const snapshot = await h.snapshot();
-		expect(snapshot?.zones[0]).toMatchObject({
-			zone: "example.com",
-			originStatus: ["200", "502"],
-			country: ["US", "DE"],
-			host: ["a.example.com", "b.example.com"],
-			requests: [1, 2],
-		});
-		// Packed counters live outside the generic state, which stays empty.
-		expect(h.storage.values.get("state")).toMatchObject({
-			metrics: [],
-			counters: {},
-			lastError: null,
-		});
-		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
-	});
-
-	it("accumulates across refreshes and restarts without double-counting retries", async () => {
-		const h = await createOriginStatusHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-		await h.refresh(2);
-		await h.restart();
-		await h.refresh(2);
-
-		expect((await h.snapshot())?.zones[0]?.requests).toEqual([20]);
-	});
-
-	it("keeps rows out of storage when the flag is disabled", async () => {
-		const h = await createOriginStatusHarness();
-		await h.refresh(1);
-
-		expect(await h.snapshot()).toBeUndefined();
-		expect([...h.storage.values.keys()]).not.toContain("packed-colo-metrics");
-		// The unpacked path still accumulates into the generic state.
-		const metrics = await h.exporter.export();
-		expect(
-			metrics.find(
-				(metric) =>
-					metric.name ===
-					"cloudflare_zone_requests_origin_status_country_host_total",
-			)?.values[0],
-		).toMatchObject({ value: 10 });
-	});
-
-	it("starts a fresh packed generation after the flag was disabled", async () => {
-		const h = await createOriginStatusHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-		expect((await h.snapshot())?.zones[0]?.requests).toEqual([10]);
-
-		h.setPacked(false);
-		await h.refresh(2);
-		expect(await h.snapshot()).toBeUndefined();
-		expect(
-			[...h.storage.values.keys()].filter((key) =>
-				key.startsWith("packed-colo-metrics"),
-			),
-		).toEqual([]);
-
-		h.setPacked(true);
-		await h.refresh(3);
-		expect((await h.snapshot())?.zones[0]?.requests).toEqual([10]);
-	});
-});
-
-async function createAdaptiveHarness() {
-	const storage = new AlarmStorage();
-	const zone = {
-		id: "zone-id",
-		name: "example.com",
-		status: "active",
-		plan: { id: "paid", name: "Paid" },
-		account: { id: "account-id", name: "Account" },
-	};
-	storage.values.set("state", {
-		...storedState(),
-		queryName: "adaptive-metrics",
-		zones: [zone],
-	});
-	let packed = false;
-	let observations = [
-		{
-			status: 404,
-			country: "US",
-			host: "a.example.com",
-			count: 3,
-			avgOriginDurationMs: 1200,
-		},
-		{
-			status: 500,
-			country: "DE",
-			host: "b.example.com",
-			count: 2,
-			avgOriginDurationMs: 900,
-		},
-	];
-	vi.stubGlobal(
-		"fetch",
-		async () =>
-			new Response(
-				JSON.stringify({
-					data: {
-						viewer: {
-							zones: [
-								{
-									zoneTag: zone.id,
-									httpRequestsAdaptiveGroups: observations.map((row) => ({
-										dimensions: {
-											originResponseStatus: row.status,
-											clientCountryName: row.country,
-											clientRequestHTTPHost: row.host,
-										},
-										count: row.count,
-										avg: {
-											originResponseDurationMs: row.avgOriginDurationMs,
-										},
-									})),
-								},
-							],
-						},
-					},
-				}),
-				{ headers: { "content-type": "application/json" } },
-			),
-	);
-	const env = {
-		CLOUDFLARE_API_TOKEN: "test-token",
-		CONFIG_KV: {
-			get: async () => JSON.stringify({ packedMetricStorage: packed }),
-		},
-		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
-	};
-	let { exporter, ready } = createExporter(storage, env);
-	await ready;
-	return {
-		storage,
-		get exporter() {
-			return exporter;
-		},
-		setPacked(enabled: boolean) {
-			packed = enabled;
-		},
-		setObservations(rows: typeof observations) {
-			observations = rows;
-		},
-		async restart() {
-			({ exporter, ready } = createExporter(storage, env));
-			await ready;
-		},
-		async refresh(minute: number) {
-			await exporter.triggerRefresh({
-				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
-				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
-			});
-		},
-		async snapshot() {
-			const state = await exporter.exportPackedMetrics();
-			if (state !== undefined && state.queryName !== "adaptive-metrics") {
-				throw new Error("expected a packed adaptive snapshot");
-			}
-			return state;
-		},
-	};
-}
-
-describe("MetricExporter packed adaptive storage", () => {
-	it("stores compact rows and keeps generic metrics empty", async () => {
-		const h = await createAdaptiveHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-
-		expect((await h.snapshot())?.zones).toEqual([
-			{
-				zone: "example.com",
-				status: ["404", "500"],
-				country: ["US", "DE"],
-				host: ["a.example.com", "b.example.com"],
-				count: [3, 2],
-				avgOriginDurationMs: [1200, 900],
-				errors4xx: 3,
-				errors5xx: 2,
-			},
-		]);
-		expect(h.storage.values.get("state")).toMatchObject({
-			metrics: [],
-			lastError: null,
-		});
-		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
-	});
-
-	it("accumulates counter rows across refreshes and keeps current rate inputs", async () => {
-		const h = await createAdaptiveHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-		await h.refresh(2);
-
-		expect((await h.snapshot())?.zones[0]).toMatchObject({
-			count: [6, 4],
-			errors4xx: 3,
-			errors5xx: 2,
-		});
-	});
-
-	it("starts a fresh packed generation after the flag was disabled", async () => {
-		const h = await createAdaptiveHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-		expect((await h.snapshot())?.zones[0]?.count).toEqual([3, 2]);
-
-		h.setPacked(false);
-		await h.refresh(2);
-		expect(await h.snapshot()).toBeUndefined();
-
-		h.setPacked(true);
-		await h.refresh(3);
-		expect((await h.snapshot())?.zones[0]?.count).toEqual([3, 2]);
-	});
-});
-
-async function createRequestMethodHarness() {
-	const storage = new AlarmStorage();
-	const zone = {
-		id: "zone-id",
-		name: "example.com",
-		status: "active",
-		plan: { id: "paid", name: "Paid" },
-		account: { id: "account-id", name: "Account" },
-	};
 	storage.values.set("state", {
 		...storedState(),
 		queryName: "request-method-metrics",
-		zones: [zone],
+		zones: [
+			{
+				id: "zone-id",
+				name: "example.com",
+				status: "active",
+				plan: { id: "paid", name: "Paid" },
+				account: { id: "account-id", name: "Account" },
+			},
+		],
 	});
-	let packed = false;
-	let observations = [
-		{ method: "GET", count: 10 },
-		{ method: "POST", count: 2 },
-	];
 	vi.stubGlobal(
 		"fetch",
 		async () =>
@@ -744,13 +430,13 @@ async function createRequestMethodHarness() {
 						viewer: {
 							zones: [
 								{
-									zoneTag: zone.id,
-									httpRequestsAdaptiveGroups: observations.map((row) => ({
-										dimensions: {
-											clientRequestHTTPMethodName: row.method,
+									zoneTag: "zone-id",
+									httpRequestsAdaptiveGroups: [
+										{
+											dimensions: { clientRequestHTTPMethodName: "GET" },
+											count: 10,
 										},
-										count: row.count,
-									})),
+									],
 								},
 							],
 						},
@@ -766,18 +452,15 @@ async function createRequestMethodHarness() {
 		},
 		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
 	};
-	const { exporter, ready } = createExporter(storage, env);
+	let { exporter, ready } = createExporter(storage, env);
 	await ready;
 	return {
-		storage,
 		get exporter() {
 			return exporter;
 		},
-		setPacked(enabled: boolean) {
-			packed = enabled;
-		},
-		setObservations(rows: typeof observations) {
-			observations = rows;
+		async restart() {
+			({ exporter, ready } = createExporter(storage, env));
+			await ready;
 		},
 		async refresh(minute: number) {
 			await exporter.triggerRefresh({
@@ -785,438 +468,32 @@ async function createRequestMethodHarness() {
 				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
 			});
 		},
-		async snapshot() {
-			const state = await exporter.exportPackedMetrics();
-			if (state !== undefined && state.queryName !== "request-method-metrics") {
-				throw new Error("expected a packed request method snapshot");
-			}
-			return state;
-		},
 	};
 }
 
-describe("MetricExporter packed request method storage", () => {
-	it("stores one row per method and keeps generic metrics empty", async () => {
-		const h = await createRequestMethodHarness();
-		h.setPacked(true);
-		await h.refresh(1);
+describe("MetricExporter packed columnar storage", () => {
+	it("persists and replays counters while retaining the flag-off legacy path", async () => {
+		const packed = await createColumnarHarness(true);
+		await packed.refresh(1);
+		await packed.restart();
+		await packed.refresh(2);
+		await packed.restart();
+		await packed.refresh(2);
 
-		expect((await h.snapshot())?.zones).toEqual([
-			{
-				zone: "example.com",
-				rows: [
-					{ method: "GET", count: 10 },
-					{ method: "POST", count: 2 },
-				],
-			},
-		]);
-		expect(h.storage.values.get("state")).toMatchObject({
-			metrics: [],
-			lastError: null,
-		});
-		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
-	});
+		const snapshot = PackedColumnarMetricStateSchema.parse(
+			await packed.exporter.exportPackedMetrics(),
+		);
+		expect(snapshot.zones[0]?.families[0]?.values).toEqual([20]);
+		expect(await packed.exporter.export()).toEqual([]);
 
-	it("accumulates across refreshes from compact state", async () => {
-		const h = await createRequestMethodHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-		await h.refresh(2);
-
-		expect((await h.snapshot())?.zones[0]?.rows).toEqual([
-			{ method: "GET", count: 20 },
-			{ method: "POST", count: 4 },
-		]);
-	});
-
-	it("uses the legacy metric family when the flag is disabled", async () => {
-		const h = await createRequestMethodHarness();
-		await h.refresh(1);
-
-		expect(await h.snapshot()).toBeUndefined();
-		expect(await h.exporter.export()).toEqual([
+		const legacy = await createColumnarHarness(false);
+		await legacy.refresh(1);
+		expect(await legacy.exporter.exportPackedMetrics()).toBeUndefined();
+		expect(await legacy.exporter.export()).toMatchObject([
 			{
 				name: "cloudflare_zone_requests_by_method_total",
-				help: "Requests by HTTP method",
-				type: "counter",
-				values: [
-					{
-						labels: { zone: "example.com", method: "GET" },
-						value: 10,
-					},
-					{
-						labels: { zone: "example.com", method: "POST" },
-						value: 2,
-					},
-				],
+				values: [{ labels: { zone: "example.com", method: "GET" }, value: 10 }],
 			},
 		]);
-	});
-});
-
-async function createCacheMissHarness() {
-	const storage = new AlarmStorage();
-	const zone = {
-		id: "zone-id",
-		name: "example.com",
-		status: "active",
-		plan: { id: "paid", name: "Paid" },
-		account: { id: "account-id", name: "Account" },
-	};
-	storage.values.set("state", {
-		...storedState(),
-		queryName: "cache-miss-metrics",
-		zones: [zone],
-	});
-	let packed = false;
-	let observations = [
-		{
-			country: "US",
-			host: "a.example.com",
-			count: 3,
-			avgOriginDurationMs: 900,
-		},
-		{
-			country: "DE",
-			host: "b.example.com",
-			count: 0,
-			avgOriginDurationMs: 400,
-		},
-	];
-	vi.stubGlobal(
-		"fetch",
-		async () =>
-			new Response(
-				JSON.stringify({
-					data: {
-						viewer: {
-							zones: [
-								{
-									zoneTag: zone.id,
-									httpRequestsAdaptiveGroups: observations.map((row) => ({
-										dimensions: {
-											clientCountryName: row.country,
-											clientRequestHTTPHost: row.host,
-										},
-										count: row.count,
-										avg: {
-											originResponseDurationMs: row.avgOriginDurationMs,
-										},
-									})),
-								},
-							],
-						},
-					},
-				}),
-				{ headers: { "content-type": "application/json" } },
-			),
-	);
-	const env = {
-		CLOUDFLARE_API_TOKEN: "test-token",
-		CONFIG_KV: {
-			get: async () => JSON.stringify({ packedMetricStorage: packed }),
-		},
-		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
-	};
-	const { exporter, ready } = createExporter(storage, env);
-	await ready;
-	return {
-		storage,
-		get exporter() {
-			return exporter;
-		},
-		setPacked(enabled: boolean) {
-			packed = enabled;
-		},
-		setObservations(rows: typeof observations) {
-			observations = rows;
-		},
-		async refresh(minute: number) {
-			await exporter.triggerRefresh({
-				mintime: new Date(1735689600000 + (minute - 1) * 60_000).toISOString(),
-				maxtime: new Date(1735689600000 + minute * 60_000).toISOString(),
-			});
-		},
-		async snapshot() {
-			const state = await exporter.exportPackedMetrics();
-			if (state !== undefined && state.queryName !== "cache-miss-metrics") {
-				throw new Error("expected a packed cache miss snapshot");
-			}
-			return state;
-		},
-	};
-}
-
-describe("MetricExporter packed cache miss storage", () => {
-	it("stores compact rows and keeps generic metrics empty", async () => {
-		const h = await createCacheMissHarness();
-		h.setPacked(true);
-		await h.refresh(1);
-
-		expect((await h.snapshot())?.zones).toEqual([
-			{
-				zone: "example.com",
-				rows: [
-					{
-						country: "US",
-						host: "a.example.com",
-						avgOriginDurationMs: 900,
-					},
-				],
-			},
-		]);
-		expect(h.storage.values.get("state")).toMatchObject({
-			metrics: [],
-			counters: {},
-			lastError: null,
-		});
-		expect([...h.storage.values.keys()]).toContain("packed-colo-metrics");
-	});
-
-	it("uses the legacy gauge metric when the flag is disabled", async () => {
-		const h = await createCacheMissHarness();
-		await h.refresh(1);
-
-		expect(await h.snapshot()).toBeUndefined();
-		expect(await h.exporter.export()).toEqual([
-			{
-				name: "cloudflare_zone_cache_miss_origin_duration_seconds",
-				help: "Average origin response duration on cache miss in seconds",
-				type: "gauge",
-				values: [
-					{
-						labels: {
-							zone: "example.com",
-							country: "US",
-							host: "a.example.com",
-						},
-						value: 0.9,
-					},
-				],
-			},
-		]);
-	});
-});
-
-describe("MetricExporter additional packed storage", () => {
-	it("stores logpush zone snapshots without generic metrics", async () => {
-		const storage = new AlarmStorage();
-		const zone = {
-			id: "zone-id",
-			name: "example.com",
-			status: "active",
-			plan: { id: "paid", name: "Paid" },
-			account: { id: "account-id", name: "Account" },
-		};
-		storage.values.set("state", {
-			...storedState(),
-			queryName: "logpush-zone",
-			zones: [zone],
-		});
-		let packed = false;
-		vi.stubGlobal(
-			"fetch",
-			async () =>
-				new Response(
-					JSON.stringify({
-						data: {
-							viewer: {
-								zones: [
-									{
-										zoneTag: zone.id,
-										logpushHealthAdaptiveGroups: [
-											{
-												dimensions: {
-													jobId: 23,
-													destinationType: "s3",
-												},
-												count: 4,
-											},
-										],
-									},
-								],
-							},
-						},
-					}),
-					{ headers: { "content-type": "application/json" } },
-				),
-		);
-		const env = {
-			CLOUDFLARE_API_TOKEN: "test-token",
-			CONFIG_KV: {
-				get: async () => JSON.stringify({ packedMetricStorage: packed }),
-			},
-			CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
-		};
-		const { exporter, ready } = createExporter(storage, env);
-		await ready;
-
-		packed = true;
-		await exporter.triggerRefresh({
-			mintime: new Date(1735689600000).toISOString(),
-			maxtime: new Date(1735689660000).toISOString(),
-		});
-
-		const snapshot = await exporter.exportPackedMetrics();
-		if (snapshot !== undefined && snapshot.queryName !== "logpush-zone") {
-			throw new Error("expected a packed logpush zone snapshot");
-		}
-		expect(snapshot?.zones).toEqual([
-			{
-				zone: "example.com",
-				rows: [{ jobId: "23", destinationType: "s3", count: 4 }],
-			},
-		]);
-		expect(await exporter.export()).toEqual([]);
-	});
-
-	it("stores ssl certificate snapshots from zone exporters", async () => {
-		const storage = new AlarmStorage();
-		const zone = {
-			id: "zone-id",
-			name: "example.com",
-			status: "active",
-			plan: { id: "paid", name: "Paid" },
-			account: { id: "account-id", name: "Account" },
-		};
-		storage.values.set("state", {
-			...storedState(),
-			scopeType: "zone",
-			scopeId: zone.id,
-			queryName: "ssl-certificates",
-			zoneMetadata: zone,
-		});
-		const rateLimiter = { limit: async () => ({ success: true }) };
-		const env = {
-			CLOUDFLARE_API_TOKEN: "test-token",
-			CONFIG_KV: {
-				get: async () => JSON.stringify({ packedMetricStorage: true }),
-			},
-			CF_API_RATE_LIMITER: rateLimiter,
-		};
-		const client = getCloudflareMetricsClient({
-			LOG_FORMAT: "json",
-			LOG_LEVEL: "error",
-			...env,
-		} as unknown as Env);
-		vi.spyOn(client, "getSSLCertificateMetricsForZone").mockResolvedValue([
-			{
-				name: "cloudflare_zone_certificate_validation_status",
-				help: "Certificate expiry timestamp",
-				type: "gauge",
-				values: [
-					{
-						labels: {
-							zone: zone.name,
-							type: "advanced",
-							issuer: "letsencrypt",
-							status: "active",
-						},
-						value: 1_735_689_600,
-					},
-				],
-			},
-		]);
-		const { exporter, ready } = createExporter(storage, env);
-		await ready;
-
-		await exporter.triggerRefresh({
-			mintime: new Date(1735689600000).toISOString(),
-			maxtime: new Date(1735689660000).toISOString(),
-		});
-
-		const snapshot = await exporter.exportPackedMetrics();
-		if (snapshot !== undefined && snapshot.queryName !== "ssl-certificates") {
-			throw new Error("expected a packed ssl certificates snapshot");
-		}
-		expect(snapshot?.zones).toEqual([
-			{
-				zone: "example.com",
-				rows: [
-					{
-						type: "advanced",
-						issuer: "letsencrypt",
-						status: "active",
-						expiresOnSeconds: 1_735_689_600,
-					},
-				],
-			},
-		]);
-		expect(await exporter.export()).toEqual([]);
-	});
-
-	it("stores load balancer weight snapshots from zone exporters", async () => {
-		const storage = new AlarmStorage();
-		const zone = {
-			id: "zone-id",
-			name: "example.com",
-			status: "active",
-			plan: { id: "paid", name: "Paid" },
-			account: { id: "account-id", name: "Account" },
-		};
-		storage.values.set("state", {
-			...storedState(),
-			scopeType: "zone",
-			scopeId: zone.id,
-			queryName: "lb-weight-metrics",
-			zoneMetadata: zone,
-		});
-		const rateLimiter = { limit: async () => ({ success: true }) };
-		const env = {
-			CLOUDFLARE_API_TOKEN: "test-token",
-			CONFIG_KV: {
-				get: async () => JSON.stringify({ packedMetricStorage: true }),
-			},
-			CF_API_RATE_LIMITER: rateLimiter,
-		};
-		const client = getCloudflareMetricsClient({
-			LOG_FORMAT: "json",
-			LOG_LEVEL: "error",
-			...env,
-		} as unknown as Env);
-		vi.spyOn(client, "getLbWeightMetricsForZone").mockResolvedValue([
-			{
-				name: "cloudflare_zone_lb_origin_weight",
-				help: "Load balancer origin weight (0-1 normalized)",
-				type: "gauge",
-				values: [
-					{
-						labels: {
-							zone: zone.name,
-							lb_name: "public",
-							pool_name: "primary",
-							origin_name: "app-1",
-						},
-						value: 0.75,
-					},
-				],
-			},
-		]);
-		const { exporter, ready } = createExporter(storage, env);
-		await ready;
-
-		await exporter.triggerRefresh({
-			mintime: new Date(1735689600000).toISOString(),
-			maxtime: new Date(1735689660000).toISOString(),
-		});
-
-		const snapshot = await exporter.exportPackedMetrics();
-		if (snapshot !== undefined && snapshot.queryName !== "lb-weight-metrics") {
-			throw new Error("expected a packed lb weight snapshot");
-		}
-		expect(snapshot?.zones).toEqual([
-			{
-				zone: "example.com",
-				rows: [
-					{
-						lbName: "public",
-						poolName: "primary",
-						originName: "app-1",
-						weight: 0.75,
-					},
-				],
-			},
-		]);
-		expect(await exporter.export()).toEqual([]);
 	});
 });

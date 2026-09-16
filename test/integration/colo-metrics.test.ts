@@ -1,125 +1,82 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { env } from "cloudflare:workers";
-import { setupNetwork } from "@msw/cloudflare";
-import { HttpResponse, http } from "msw";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
-import { CLOUDFLARE_GQL_URL } from "../../src/cloudflare/client";
-import type { MetricExporter } from "../../src/durable-objects/MetricExporter";
-import { COLO_METRIC_SCENARIOS, type ColoMetricScenario } from "./scenarios";
+import { describe, expect, it } from "vitest";
+import {
+	createPaidZone,
+	exportSuccessfulSnapshot,
+	initializeMetricExporter,
+	mockBatchedZoneGroups,
+	setupGraphQLNetwork,
+} from "./metric-exporter-helpers";
 
-const network = setupNetwork();
+const network = setupGraphQLNetwork();
+
+type ColoMetricScenario = (typeof COLO_METRIC_SCENARIOS)[number];
+
+const COLO_METRIC_SCENARIOS = [
+	{
+		name: "small colo account",
+		zones: 1,
+		colosPerZone: 10,
+		hostsPerColo: 10,
+	},
+	{
+		name: "large colo account",
+		zones: 15,
+		colosPerZone: 10,
+		hostsPerColo: 1_000,
+	},
+] as const;
 
 function createColoGroups(scenario: ColoMetricScenario) {
-	const { colosPerZone, hostsPerColo, trafficPerHost } = scenario.scale;
+	const { colosPerZone, hostsPerColo } = scenario;
 	return Array.from({ length: colosPerZone }, (_, coloIndex) =>
 		Array.from({ length: hostsPerColo }, (_, hostIndex) => ({
 			dimensions: {
 				coloCode: `COLO-${coloIndex}`,
 				clientRequestHTTPHost: `host-${coloIndex}-${hostIndex}.example.com`,
 			},
-			count: trafficPerHost.requests,
+			count: 10,
 			sum: {
-				visits: trafficPerHost.visits,
-				edgeResponseBytes: trafficPerHost.responseBytes,
+				visits: 8,
+				edgeResponseBytes: 2_048,
 			},
 		})),
 	).flat();
 }
 
-beforeAll(() => network.enable());
-afterEach(() => network.resetHandlers());
-afterAll(() => network.disable());
-
 describe("colo-metrics Durable Object", () => {
-	it.each(COLO_METRIC_SCENARIOS)("$path $name", async (scenario) => {
+	it.each(COLO_METRIC_SCENARIOS)("$name", async (scenario) => {
 		const accountId = scenario.name.replaceAll(" ", "-");
-		const zones = Array.from({ length: scenario.scale.zones }, (_, index) => ({
-			id: `${accountId}-zone-${index}`,
-			name: `${accountId}-zone-${index}.example.com`,
-			status: "active",
-			plan: { id: "paid", name: "Paid" },
-			account: { id: accountId, name: accountId },
-		}));
+		const zones = Array.from({ length: scenario.zones }, (_, index) =>
+			createPaidZone(accountId, `${accountId}-zone-${index}`),
+		);
 		const groups = createColoGroups(scenario);
-		let graphQLRequests = 0;
-		network.use(
-			http.post(CLOUDFLARE_GQL_URL, async ({ request }) => {
-				graphQLRequests++;
-				const body = z
-					.object({ variables: z.object({ zoneIDs: z.array(z.string()) }) })
-					.parse(await request.json());
-				const requestedZones = new Set(body.variables.zoneIDs);
-				return HttpResponse.json({
-					data: {
-						viewer: {
-							zones: zones
-								.filter((zone) => requestedZones.has(zone.id))
-								.map((zone) => ({
-									zoneTag: zone.id,
-									httpRequestsAdaptiveGroups: groups,
-								})),
-						},
-					},
-				});
-			}),
-		);
-		const exporterId = `account:${accountId}:${scenario.path.metric}`;
-		const stub = env.MetricExporter.getByName(exporterId);
-		await stub.initialize(exporterId);
-		await stub.updateZoneContext(
-			accountId,
-			accountId,
+		const graphQLRequests = mockBatchedZoneGroups(
+			network,
 			zones,
-			{},
-			{
-				mintime: "2026-01-01T00:00:00.000Z",
-				maxtime: "2026-01-01T00:01:00.000Z",
-			},
+			"httpRequestsAdaptiveGroups",
+			groups,
+		);
+		const snapshot = await exportSuccessfulSnapshot(
+			await initializeMetricExporter(accountId, "colo-metrics", zones),
 		);
 
-		const lastError = await runInDurableObject(
-			stub,
-			async (_instance: MetricExporter, state) => {
-				const stored = await state.storage.get<{ lastError: string | null }>(
-					"state",
-				);
-				return stored?.lastError;
-			},
-		);
-		expect(lastError).toBeNull();
-		expect(graphQLRequests).toBe(Math.ceil(scenario.scale.zones / 10));
-
-		await evictDurableObject(stub);
-		const snapshot = await stub.exportPackedMetrics();
-		if (snapshot?.queryName !== "colo-metrics") {
-			throw new Error("expected a packed colo snapshot");
+		expect(graphQLRequests()).toBe(Math.ceil(scenario.zones / 10));
+		if (snapshot?.format !== "colo-packed-by-zone-v2") {
+			throw new Error("expected a colo-metrics snapshot");
 		}
 		const expectedRecords =
-			scenario.scale.zones *
-			scenario.scale.colosPerZone *
-			scenario.scale.hostsPerColo;
+			scenario.zones * scenario.colosPerZone * scenario.hostsPerColo;
 		expect(
 			snapshot.zones.reduce((total, zone) => total + zone.colo.length, 0),
 		).toBe(expectedRecords);
 		for (const zone of snapshot.zones) {
-			expect(
-				zone.visits.every(
-					(value) => value === scenario.scale.trafficPerHost.visits,
-				),
-			).toBe(true);
-			expect(
-				zone.edgeResponseBytes.every(
-					(value) => value === scenario.scale.trafficPerHost.responseBytes,
-				),
-			).toBe(true);
-			expect(
-				zone.requests.every(
-					(value) => value === scenario.scale.trafficPerHost.requests,
-				),
-			).toBe(true);
+			expect(zone.visits.every((value) => value === 8)).toBe(true);
+			expect(zone.edgeResponseBytes.every((value) => value === 2_048)).toBe(
+				true,
+			);
+			expect(zone.requests.every((value) => value === 10)).toBe(true);
 		}
 	});
 });
