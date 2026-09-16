@@ -10,6 +10,7 @@ import type { SerializeOptions } from "./prometheus";
 export const COLUMNAR_METRIC_QUERIES = [
 	"adaptive-metrics",
 	"cache-miss-metrics",
+	"colo-metrics",
 	"colo-error-metrics",
 	"edge-country-metrics",
 	"health-check-metrics",
@@ -39,6 +40,7 @@ const CounterColumnsSchema = z.object({
 const FamilyColumnsSchema = z.object({
 	family: z.number().int().nonnegative(),
 	labels: z.record(z.string(), z.array(z.string())),
+	labelsFrom: z.number().int().nonnegative().optional(),
 	values: z.array(z.number()),
 	counter: CounterColumnsSchema.optional(),
 });
@@ -90,11 +92,12 @@ function validateFamilyNames(
 function validateFamilyTable(
 	family: FamilyMetadata,
 	table: FamilyColumns,
+	labels: Record<string, string[]>,
 	path: (string | number)[],
 	ctx: ValidationContext,
 ) {
 	if (
-		Object.values(table.labels).some(
+		Object.values(labels).some(
 			(column) => column.length !== table.values.length,
 		)
 	) {
@@ -106,10 +109,10 @@ function validateFamilyTable(
 	}
 
 	const rowKeys = new Set<string>();
-	const labelNames = Object.keys(table.labels);
+	const labelNames = Object.keys(labels);
 	for (let rowIndex = 0; rowIndex < table.values.length; rowIndex++) {
 		const key = rowKey(
-			labelNames.map((label) => table.labels[label]?.[rowIndex] ?? ""),
+			labelNames.map((label) => labels[label]?.[rowIndex] ?? ""),
 		);
 		if (rowKeys.has(key)) {
 			addValidationIssue(
@@ -165,7 +168,30 @@ function validateZones(
 				continue;
 			}
 			familyIndexes.add(table.family);
-			validateFamilyTable(family, table, path, ctx);
+			const labelSource =
+				table.labelsFrom === undefined
+					? undefined
+					: zone.families.find(
+							(candidate) => candidate.family === table.labelsFrom,
+						);
+			if (
+				table.labelsFrom !== undefined &&
+				(labelSource === undefined || labelSource.labelsFrom !== undefined)
+			) {
+				addValidationIssue(
+					ctx,
+					[...path, "labelsFrom"],
+					"Invalid shared label source",
+				);
+				continue;
+			}
+			validateFamilyTable(
+				family,
+				table,
+				labelSource?.labels ?? table.labels,
+				path,
+				ctx,
+			);
 		}
 	}
 }
@@ -247,7 +273,7 @@ function collectFamilyLabels(
 	};
 	for (const zone of previous?.zones ?? []) {
 		for (const table of zone.families) {
-			append(table.family, Object.keys(table.labels));
+			append(table.family, Object.keys(resolveLabels(zone, table)));
 		}
 	}
 	const familyIndexes = new Map(
@@ -262,12 +288,13 @@ function collectFamilyLabels(
 
 function storedRows(
 	table: z.infer<typeof FamilyColumnsSchema> | undefined,
+	labelColumns: Record<string, string[]>,
 	labels: readonly string[],
 ): Map<string, Row> {
 	const rows = new Map<string, Row>();
 	if (table === undefined) return rows;
 	for (let index = 0; index < table.values.length; index++) {
-		const values = labels.map((label) => table.labels[label]?.[index] ?? "");
+		const values = labels.map((label) => labelColumns[label]?.[index] ?? "");
 		rows.set(rowKey(values), {
 			labels: values,
 			value: table.values[index] ?? 0,
@@ -386,6 +413,32 @@ function packRows(
 	};
 }
 
+function resolveLabels(
+	zone: z.infer<typeof ZoneColumnsSchema>,
+	table: FamilyColumns,
+): Record<string, string[]> {
+	if (table.labelsFrom === undefined) return table.labels;
+	return (
+		zone.families.find((candidate) => candidate.family === table.labelsFrom)
+			?.labels ?? table.labels
+	);
+}
+
+function shareIdenticalLabels(
+	tables: PackedColumnarMetricState["zones"][number]["families"],
+) {
+	const sources = new Map<string, number>();
+	return tables.map((table) => {
+		const key = JSON.stringify(table.labels);
+		const source = sources.get(key);
+		if (source !== undefined) {
+			return { ...table, labels: {}, labelsFrom: source };
+		}
+		sources.set(key, table.family);
+		return table;
+	});
+}
+
 export function accumulateColumnarMetricState(input: {
 	previous: PackedColumnarMetricState | undefined;
 	metrics: readonly MetricDefinition[];
@@ -415,17 +468,19 @@ export function accumulateColumnarMetricState(input: {
 		}
 		const tables = families.flatMap((family, familyIndex) => {
 			const labels = labelsByFamily.get(familyIndex) ?? [];
+			const previousTable = previousZone?.families.find(
+				(table) => table.family === familyIndex,
+			);
+			const previousLabels =
+				previousZone === undefined || previousTable === undefined
+					? {}
+					: resolveLabels(previousZone, previousTable);
 			const observed =
 				observedZones.get(zone)?.get(familyIndex) ?? new Map<string, Row>();
 			const rows =
 				family.type === "counter"
 					? mergeCounterRows(
-							storedRows(
-								previousZone?.families.find(
-									(table) => table.family === familyIndex,
-								),
-								labels,
-							),
+							storedRows(previousTable, previousLabels, labels),
 							observed,
 							input.ingestId,
 							ageMissing,
@@ -434,7 +489,9 @@ export function accumulateColumnarMetricState(input: {
 			const packed = packRows(familyIndex, family, labels, rows.values());
 			return packed === undefined ? [] : [packed];
 		});
-		if (tables.length > 0) zones.push({ zone, families: tables });
+		if (tables.length > 0) {
+			zones.push({ zone, families: shareIdenticalLabels(tables) });
+		}
 	}
 	return {
 		format: "metric-columnar-v1",
@@ -460,10 +517,11 @@ function familySamples(
 					(candidate) => candidate.family === familyIndex,
 				);
 				if (table === undefined) continue;
+				const labelColumns = resolveLabels(zone, table);
 				for (let index = 0; index < table.values.length; index++) {
 					yield {
 						zone: zone.zone,
-						keys: labels.map((label) => table.labels[label]?.[index] ?? ""),
+						keys: labels.map((label) => labelColumns[label]?.[index] ?? ""),
 						value: table.values[index] ?? 0,
 					};
 				}
@@ -487,8 +545,9 @@ export function* serializeColumnarMetricStates(
 				const name = state.families[table.family]?.name;
 				if (name === undefined) continue;
 				const labels = labelsByFamily.get(name) ?? [];
+				const labelColumns = resolveLabels(zone, table);
 				labels.push(
-					...Object.keys(table.labels).filter(
+					...Object.keys(labelColumns).filter(
 						(label) => !labels.includes(label),
 					),
 				);

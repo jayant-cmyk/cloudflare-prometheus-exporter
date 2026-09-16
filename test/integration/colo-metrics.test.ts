@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	createPaidZone,
-	exportSuccessfulSnapshot,
+	expectSuccessfulRefresh,
 	initializeMetricExporter,
 	mockBatchedZoneGroups,
 	setupGraphQLNetwork,
@@ -42,36 +42,44 @@ describe("colo-metrics Durable Object", () => {
 			"httpRequestsAdaptiveGroups",
 			groups,
 		);
-		const snapshot = await exportSuccessfulSnapshot(
+		const snapshot = await expectSuccessfulRefresh(
 			await initializeMetricExporter(accountId, "colo-metrics", zones),
 		);
 
 		expect(graphQLRequests()).toBe(Math.ceil(scenario.scale.zones / 10));
-		if (snapshot?.format !== "colo-packed-by-zone-v2") {
-			throw new Error("expected a colo-metrics snapshot");
-		}
 		const expectedRecords =
 			scenario.scale.zones *
 			scenario.scale.colosPerZone *
 			scenario.scale.hostsPerColo;
 		expect(
-			snapshot.zones.reduce((total, zone) => total + zone.colo.length, 0),
+			snapshot.zones.reduce(
+				(total, zone) => total + (zone.families[0]?.values.length ?? 0),
+				0,
+			),
 		).toBe(expectedRecords);
 		for (const zone of snapshot.zones) {
+			const valuesByName = new Map(
+				zone.families.map((table) => [
+					snapshot.families[table.family]?.name,
+					table.values,
+				]),
+			);
 			expect(
-				zone.visits.every(
-					(value) => value === scenario.scale.trafficPerHost.visits,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_visits_total")
+					?.every((value) => value === scenario.scale.trafficPerHost.visits),
 			).toBe(true);
 			expect(
-				zone.edgeResponseBytes.every(
-					(value) => value === scenario.scale.trafficPerHost.responseBytes,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_edge_response_bytes_total")
+					?.every(
+						(value) => value === scenario.scale.trafficPerHost.responseBytes,
+					),
 			).toBe(true);
 			expect(
-				zone.requests.every(
-					(value) => value === scenario.scale.trafficPerHost.requests,
-				),
+				valuesByName
+					.get("cloudflare_zone_colocation_requests_total")
+					?.every((value) => value === scenario.scale.trafficPerHost.requests),
 			).toBe(true);
 		}
 	});

@@ -148,12 +148,12 @@ describe("metric-columnar-v1 integration", () => {
 			zone: zone.name,
 			families: [
 				{ family: 0, labels: { host: ["example.com"] }, values: [12] },
-				{ family: 1, labels: { host: ["example.com"] }, values: [0.1] },
-				{ family: 2, labels: { host: ["example.com"] }, values: [0.08] },
-				{ family: 3, labels: { host: ["example.com"] }, values: [0.18] },
-				{ family: 4, labels: { host: ["example.com"] }, values: [0.2] },
-				{ family: 5, labels: { host: ["example.com"] }, values: [0.15] },
-				{ family: 6, labels: { host: ["example.com"] }, values: [0.35] },
+				{ family: 1, labels: {}, labelsFrom: 0, values: [0.1] },
+				{ family: 2, labels: {}, labelsFrom: 0, values: [0.08] },
+				{ family: 3, labels: {}, labelsFrom: 0, values: [0.18] },
+				{ family: 4, labels: {}, labelsFrom: 0, values: [0.2] },
+				{ family: 5, labels: {}, labelsFrom: 0, values: [0.15] },
+				{ family: 6, labels: {}, labelsFrom: 0, values: [0.35] },
 			],
 		});
 	});

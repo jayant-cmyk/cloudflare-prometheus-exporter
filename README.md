@@ -202,7 +202,7 @@ curl -X DELETE https://your-worker.workers.dev/config
 - Each counter series stores its own retry checkpoint. Replaying the same query window is idempotent. Series not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
 - When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.
 - Packed queries keep their existing metric families. `colo-metrics` uses its reduced packed query, health checks use separate event and timing aliases, and hostname metrics preserve their four aliases and fixed one-minute window.
-- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. For the specialized colo format, 150,000 rows (450,000 samples) use ~8 MiB with typical hostnames.
+- The 16 MiB serialized-state guard (`Chunked storage value exceeds the safe size limit`) still applies per query. Families with identical label columns share one copy, keeping high-cardinality multi-family queries such as `colo-metrics` within the guard.
 
 ## Available Metrics
 

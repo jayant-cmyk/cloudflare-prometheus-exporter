@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { MetricDefinition } from "./metrics";
 import {
 	accumulatePackedMetricState,
@@ -60,12 +60,8 @@ describe("packed metric state facade", () => {
 		expect(isPackedMetricQuery("account-metrics")).toBe(false);
 	});
 
-	it("retains the dedicated colo codec", () => {
-		vi.spyOn(Date, "now").mockReturnValue(123);
+	it("dispatches colo metrics to the generic columnar codec", () => {
 		const state = accumulatePackedMetricState({
-			queryName: "colo-metrics",
-			accountId: "account-id",
-			accountName: "Account",
 			previous: undefined,
 			metrics: coloMetrics,
 			ingestId: 10,
@@ -73,17 +69,30 @@ describe("packed metric state facade", () => {
 		});
 
 		expect(state).toMatchObject({
-			format: "colo-packed-by-zone-v2",
-			lastFetch: 123,
+			format: "metric-columnar-v1",
 			lastIngest: 10,
 			zones: [
 				{
 					zone: "example.com",
-					colo: ["SJC"],
-					host: ["www.example.com"],
-					visits: [2],
-					edgeResponseBytes: [3],
-					requests: [4],
+					families: [
+						{
+							family: 0,
+							labels: { colo: ["SJC"], host: ["www.example.com"] },
+							values: [2],
+						},
+						{
+							family: 1,
+							labels: {},
+							labelsFrom: 0,
+							values: [3],
+						},
+						{
+							family: 2,
+							labels: {},
+							labelsFrom: 0,
+							values: [4],
+						},
+					],
 				},
 			],
 		});
@@ -91,9 +100,6 @@ describe("packed metric state facade", () => {
 
 	it("dispatches other queries to the generic columnar codec", () => {
 		const state = accumulatePackedMetricState({
-			queryName: "origin-status-metrics",
-			accountId: "account-id",
-			accountName: "Account",
 			previous: undefined,
 			metrics: originStatusMetrics,
 			ingestId: 20,
@@ -119,29 +125,5 @@ describe("packed metric state facade", () => {
 				},
 			],
 		});
-	});
-
-	it("does not adopt a snapshot from another codec", () => {
-		const colo = accumulatePackedMetricState({
-			queryName: "colo-metrics",
-			accountId: "account-id",
-			accountName: "Account",
-			previous: undefined,
-			metrics: coloMetrics,
-			ingestId: 10,
-			failedScopes: new Set(),
-		});
-		const state = accumulatePackedMetricState({
-			queryName: "origin-status-metrics",
-			accountId: "account-id",
-			accountName: "Account",
-			previous: colo,
-			metrics: originStatusMetrics,
-			ingestId: 20,
-			failedScopes: new Set(),
-		});
-
-		expect(state.format).toBe("metric-columnar-v1");
-		expect(state.zones).toHaveLength(1);
 	});
 });

@@ -26,7 +26,6 @@ import {
 	accumulatePackedMetricState,
 	isPackedMetricQuery,
 	PACKED_METRIC_STATE_KEY,
-	type PackedMetricQuery,
 	type PackedMetricState,
 	PackedMetricStateSchema,
 } from "../lib/packed-metric-state";
@@ -42,6 +41,9 @@ import {
 } from "../lib/types";
 
 const STATE_KEY = "state";
+const LegacyPackedColoStateSchema = z.object({
+	format: z.literal("colo-packed-by-zone-v2"),
+});
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 /**
  * Maximum allowed hostnames in HOST_METRICS_ALLOWLIST.
@@ -422,8 +424,6 @@ export class MetricExporter extends DurableObject<Env> {
 				const currentState = this.getState();
 				await this.savePackedMetricState(
 					result.metrics,
-					currentState,
-					state.queryName,
 					ingestId,
 					result.failedScopes,
 				);
@@ -785,25 +785,27 @@ export class MetricExporter extends DurableObject<Env> {
 	private async loadPackedMetricState(): Promise<
 		PackedMetricState | undefined
 	> {
-		return loadChunkedValue(
+		const stored = await loadChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
 			PACKED_METRIC_STATE_KEY,
-			PackedMetricStateSchema,
+			z.unknown(),
 		);
+		if (stored === undefined) return undefined;
+		const packed = PackedMetricStateSchema.safeParse(stored);
+		if (packed.success) return packed.data;
+		if (LegacyPackedColoStateSchema.safeParse(stored).success) {
+			return undefined;
+		}
+		return PackedMetricStateSchema.parse(stored);
 	}
 
 	private async savePackedMetricState(
 		metrics: MetricDefinition[],
-		state: MetricExporterState,
-		queryName: PackedMetricQuery,
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
 		const previous = await this.loadPackedMetricState();
 		const packed = accumulatePackedMetricState({
-			queryName,
-			accountId: state.accountId,
-			accountName: state.accountName,
 			previous,
 			metrics,
 			ingestId,

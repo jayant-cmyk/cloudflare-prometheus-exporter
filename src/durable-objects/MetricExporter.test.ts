@@ -311,15 +311,31 @@ async function createColoHarness(zoneCount = 1) {
 		},
 		async requests() {
 			const packed = await exporter.exportPackedMetrics();
-			if (packed !== undefined && packed.format !== "colo-packed-by-zone-v2") {
-				throw new Error("expected a packed colo snapshot");
-			}
-			return packed?.zones[0]?.requests;
+			const family = packed?.families.findIndex(
+				(candidate) =>
+					candidate.name === "cloudflare_zone_colocation_requests_total",
+			);
+			return packed?.zones[0]?.families.find((table) => table.family === family)
+				?.values;
 		},
 	};
 }
 
 describe("MetricExporter packed colo storage", () => {
+	it("replaces the legacy colo snapshot with generic columnar state", async () => {
+		const h = await createColoHarness();
+		h.storage.values.set("packed-colo-metrics", {
+			format: "colo-packed-by-zone-v2",
+		});
+		h.setPacked(true);
+		await h.refresh(1);
+
+		expect(await h.requests()).toEqual([10]);
+		expect(await h.exporter.exportPackedMetrics()).toMatchObject({
+			format: "metric-columnar-v1",
+		});
+	});
+
 	it("accumulates packed counters across refreshes and restarts without double-counting retries", async () => {
 		const h = await createColoHarness();
 		h.setPacked(true);
@@ -341,18 +357,16 @@ describe("MetricExporter packed colo storage", () => {
 		await h.refresh(2);
 		await h.refresh(2);
 		const snapshot = await h.exporter.exportPackedMetrics();
-		if (
-			snapshot !== undefined &&
-			snapshot.format !== "colo-packed-by-zone-v2"
-		) {
-			throw new Error("expected a packed colo snapshot");
-		}
-		expect(snapshot?.zones[0]?.misses).toEqual([4]);
+		const requestsFamily = snapshot?.families.findIndex(
+			(family) => family.name === "cloudflare_zone_colocation_requests_total",
+		);
+		expect(
+			snapshot?.zones[0]?.families.find(
+				(table) => table.family === requestsFamily,
+			)?.counter?.misses,
+		).toEqual([4]);
 		for (let minute = 3; minute <= 6; minute++) await h.refresh(minute);
 		const expired = await h.exporter.exportPackedMetrics();
-		if (expired !== undefined && expired.format !== "colo-packed-by-zone-v2") {
-			throw new Error("expected a packed colo snapshot");
-		}
 		expect(expired?.zones).toEqual([]);
 	});
 
@@ -371,14 +385,11 @@ describe("MetricExporter packed colo storage", () => {
 		await h.restart();
 		expect(h.storage.values.get("state")).toMatchObject({ lastError: null });
 		const snapshot = await h.exporter.exportPackedMetrics();
-		if (
-			snapshot !== undefined &&
-			snapshot.format !== "colo-packed-by-zone-v2"
-		) {
-			throw new Error("expected a packed colo snapshot");
-		}
 		expect(
-			snapshot?.zones.reduce((total, zone) => total + zone.colo.length, 0),
+			snapshot?.zones.reduce(
+				(total, zone) => total + (zone.families[0]?.values.length ?? 0),
+				0,
+			),
 		).toBe(150_000);
 		const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
 		expect(bytes).toBeLessThan(16 * 1024 * 1024);
