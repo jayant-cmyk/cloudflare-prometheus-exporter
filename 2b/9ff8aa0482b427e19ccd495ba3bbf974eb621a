@@ -1,0 +1,31 @@
+src/durable-objects/MetricCoordinator.ts
+  s_e65321cc7a050f::t_189f9ee2cfea39 279-282
+src/lib/columnar-observations.ts
+  s_5941d6eb6f2ca5::t_465116b6500ee1 58-64
+src/lib/packed-columnar-metric.test.ts
+  s_5941d6eb6f2ca5::t_43141c6d595d81 54-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b9ff8aa0482b427e19ccd495ba3bbf974eb621a",
+  "prompts": {},
+  "sessions": {
+    "s_5941d6eb6f2ca5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f50814621ffeuJPTlFviQadd9G",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    },
+    "s_e65321cc7a050f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5076c06bffeXmbTHonQeSmsXv",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
