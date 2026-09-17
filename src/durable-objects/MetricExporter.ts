@@ -359,7 +359,9 @@ export class MetricExporter extends DurableObject<Env> {
 		config: ResolvedConfig,
 		logger: Logger,
 	): Promise<void> {
-		const state = this.getState();
+		let state = this.getState();
+		const usePackedStorage =
+			isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
 
 		// Skip if zone context not yet pushed (account-scoped needs zones)
 		if (state.scopeType === "account" && state.zones.length === 0) {
@@ -379,8 +381,6 @@ export class MetricExporter extends DurableObject<Env> {
 		if (state.scopeType === "zone") {
 			const cacheAgeMs = Date.now() - state.lastSslFetch;
 			const cacheTtlMs = config.sslCertsCacheTtlSeconds * 1000;
-			const usePackedStorage =
-				isPackedMetricQuery(state.queryName) && config.packedMetricStorage;
 			const hasCurrentRepresentation = usePackedStorage
 				? (await this.loadPackedMetricState()) !== undefined
 				: state.metrics.length > 0;
@@ -402,6 +402,14 @@ export class MetricExporter extends DurableObject<Env> {
 		let nextRefreshDelaySeconds = config.metricRefreshIntervalSeconds;
 
 		try {
+			if (usePackedStorage && state.metrics.length > 0) {
+				const migrated = await this.loadOrMigratePackedMetricState();
+				if (migrated !== undefined) {
+					state = { ...state, metrics: [], counters: {} };
+					this.state = state;
+				}
+			}
+
 			let result: MetricFetchResult;
 
 			if (state.scopeType === "account") {
@@ -413,10 +421,7 @@ export class MetricExporter extends DurableObject<Env> {
 					logger,
 				);
 			} else {
-				if (
-					isPackedMetricQuery(state.queryName) &&
-					config.packedMetricStorage
-				) {
+				if (usePackedStorage && isPackedMetricQuery(state.queryName)) {
 					const zoneMetadata = state.zoneMetadata;
 					result = {
 						metrics: [],
@@ -445,7 +450,7 @@ export class MetricExporter extends DurableObject<Env> {
 			}
 
 			const ingestId = new Date(timeRange.maxtime).getTime();
-			if (isPackedMetricQuery(state.queryName) && config.packedMetricStorage) {
+			if (usePackedStorage) {
 				if (result.packedMetrics === undefined) {
 					throw new Error(
 						`Packed refresh did not return columnar output for ${state.queryName}`,
@@ -869,12 +874,34 @@ export class MetricExporter extends DurableObject<Env> {
 		return PackedMetricStateSchema.parse(stored);
 	}
 
+	private async loadOrMigratePackedMetricState(): Promise<
+		PackedMetricState | undefined
+	> {
+		const stored = await this.loadPackedMetricState();
+		if (stored !== undefined) return stored;
+
+		const state = this.getState();
+		if (state.metrics.length === 0) return undefined;
+		const migrated = accumulatePackedMetricState({
+			previous: undefined,
+			metrics: state.metrics,
+			ingestId: state.lastIngest,
+			failedScopes: new Set(),
+		});
+		await saveChunkedValue(
+			chunkedDurableObjectStorage(this.ctx.storage),
+			PACKED_METRIC_STATE_KEY,
+			migrated,
+		);
+		return migrated;
+	}
+
 	private async savePackedMetricState(
 		metrics: ColumnarMetricSource[],
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
 	): Promise<void> {
-		const previous = await this.loadPackedMetricState();
+		const previous = await this.loadOrMigratePackedMetricState();
 		const packed = accumulatePackedMetricState({
 			previous,
 			metrics,
@@ -906,12 +933,16 @@ export class MetricExporter extends DurableObject<Env> {
 		return this.getState().metrics;
 	}
 
-	/** Packed counters, or undefined until the first packed refresh has run. */
-	async exportPackedMetrics(): Promise<PackedMetricState | undefined> {
+	/** Packed counters, optionally migrated from the currently exported metrics. */
+	async exportPackedMetrics(options?: {
+		migrateLegacyMetrics?: boolean;
+	}): Promise<PackedMetricState | undefined> {
 		const state = this.getState();
 		if (!isPackedMetricQuery(state.queryName)) {
 			return undefined;
 		}
-		return this.loadPackedMetricState();
+		return options?.migrateLegacyMetrics
+			? this.loadOrMigratePackedMetricState()
+			: this.loadPackedMetricState();
 	}
 }

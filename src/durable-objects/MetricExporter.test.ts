@@ -398,7 +398,7 @@ describe("MetricExporter packed colo storage", () => {
 		});
 	}, 15_000);
 
-	it("starts a fresh packed generation after the flag was disabled", async () => {
+	it("migrates the unpacked generation when packed storage is re-enabled", async () => {
 		const h = await createColoHarness();
 		h.setPacked(true);
 		await h.refresh(1);
@@ -413,12 +413,14 @@ describe("MetricExporter packed colo storage", () => {
 		).toEqual([]);
 		h.setPacked(true);
 		await h.refresh(3);
-		expect(await h.requests()).toEqual([10]);
+		expect(await h.requests()).toEqual([20]);
 	});
 });
 
 async function createColumnarHarness(packed: boolean) {
 	const storage = new AlarmStorage();
+	let packedStorage = packed;
+	let fetchObserver: ((packedStateExists: boolean) => void) | undefined;
 	storage.values.set("state", {
 		...storedState(),
 		queryName: "request-method-metrics",
@@ -432,34 +434,33 @@ async function createColumnarHarness(packed: boolean) {
 			},
 		],
 	});
-	vi.stubGlobal(
-		"fetch",
-		async () =>
-			new Response(
-				JSON.stringify({
-					data: {
-						viewer: {
-							zones: [
-								{
-									zoneTag: "zone-id",
-									httpRequestsAdaptiveGroups: [
-										{
-											dimensions: { clientRequestHTTPMethodName: "GET" },
-											count: 10,
-										},
-									],
-								},
-							],
-						},
+	vi.stubGlobal("fetch", async () => {
+		fetchObserver?.(storage.values.has("packed-colo-metrics"));
+		return new Response(
+			JSON.stringify({
+				data: {
+					viewer: {
+						zones: [
+							{
+								zoneTag: "zone-id",
+								httpRequestsAdaptiveGroups: [
+									{
+										dimensions: { clientRequestHTTPMethodName: "GET" },
+										count: 10,
+									},
+								],
+							},
+						],
 					},
-				}),
-				{ headers: { "content-type": "application/json" } },
-			),
-	);
+				},
+			}),
+			{ headers: { "content-type": "application/json" } },
+		);
+	});
 	const env = {
 		CLOUDFLARE_API_TOKEN: "test-token",
 		CONFIG_KV: {
-			get: async () => JSON.stringify({ packedMetricStorage: packed }),
+			get: async () => JSON.stringify({ packedMetricStorage: packedStorage }),
 		},
 		CF_API_RATE_LIMITER: { limit: async () => ({ success: true }) },
 	};
@@ -468,6 +469,12 @@ async function createColumnarHarness(packed: boolean) {
 	return {
 		get exporter() {
 			return exporter;
+		},
+		setPacked(enabled: boolean) {
+			packedStorage = enabled;
+		},
+		observeFetch(observer: (packedStateExists: boolean) => void) {
+			fetchObserver = observer;
 		},
 		async restart() {
 			({ exporter, ready } = createExporter(storage, env));
@@ -483,6 +490,39 @@ async function createColumnarHarness(packed: boolean) {
 }
 
 describe("MetricExporter packed columnar storage", () => {
+	it("persists the unpacked migration before fetching packed metrics", async () => {
+		const h = await createColumnarHarness(false);
+		await h.refresh(1);
+		h.setPacked(true);
+		let packedStateExisted = false;
+		h.observeFetch((exists) => {
+			packedStateExisted = exists;
+		});
+
+		await h.refresh(2);
+
+		expect(packedStateExisted).toBe(true);
+	});
+
+	it("migrates the active unpacked counter before the first packed refresh", async () => {
+		const h = await createColumnarHarness(false);
+		await h.refresh(1);
+		h.setPacked(true);
+
+		const migrated = PackedColumnarMetricStateSchema.parse(
+			await h.exporter.exportPackedMetrics({ migrateLegacyMetrics: true }),
+		);
+		expect(migrated.zones[0]?.families[0]?.values).toEqual([10]);
+
+		await h.restart();
+		await h.refresh(2);
+		const refreshed = PackedColumnarMetricStateSchema.parse(
+			await h.exporter.exportPackedMetrics(),
+		);
+		expect(refreshed.zones[0]?.families[0]?.values).toEqual([20]);
+		expect(await h.exporter.export()).toEqual([]);
+	});
+
 	it("persists and replays counters while retaining the flag-off legacy path", async () => {
 		const packed = await createColumnarHarness(true);
 		await packed.refresh(1);

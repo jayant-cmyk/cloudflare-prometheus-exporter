@@ -197,7 +197,7 @@ curl -X DELETE https://your-worker.workers.dev/config
 
 `packedMetricStorage` stores selected queries in compact typed state with named label columns instead of label-repeating rows, and streams the output in bounded chunks. Metric names and labels are unchanged.
 
-- Toggling the flag in either direction **resets the counters of every packed query** (Prometheus `rate()`/`increase()` handle counter resets). Disabling deletes the packed snapshots on the next refresh, so re-enabling starts from zero rather than reviving old totals. The affected metrics are absent until the first successful refresh in the new mode.
+- Enabling packed storage migrates currently exported counters before adding the next window. Counters retained internally but currently absent cannot be migrated. Disabling deletes packed snapshots and starts a fresh unpacked counter generation on the next refresh.
 - The storage mode is resolved once per scrape and applied to every account, so a scrape never mixes packed and unpacked output for the same metric family.
 - Each counter series stores its own retry checkpoint. Replaying the same query window is idempotent. Series not seen for five refreshes are dropped; until then they are exported with their last value (a flat counter), whereas the unpacked path stops exporting a series the moment it is absent.
 - When `excludeHost` is set, packed rows that collapse onto the same remaining labels are summed, matching the unpacked serializer.

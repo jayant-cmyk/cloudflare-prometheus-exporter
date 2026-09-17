@@ -384,7 +384,9 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 							`account:${state.accountId}:${query}`,
 							this.env,
 						);
-						return await exporter.exportPackedMetrics();
+						return await exporter.exportPackedMetrics({
+							migrateLegacyMetrics: true,
+						});
 					} catch (error) {
 						const msg = error instanceof Error ? error.message : String(error);
 						logger.error("Failed to export account packed metrics", {
@@ -403,7 +405,9 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 										`zone:${zone.id}:${query}`,
 										this.env,
 									);
-									return await exporter.exportPackedMetrics();
+									return await exporter.exportPackedMetrics({
+										migrateLegacyMetrics: true,
+									});
 								} catch (error) {
 									const msg =
 										error instanceof Error ? error.message : String(error);
