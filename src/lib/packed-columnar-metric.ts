@@ -1,5 +1,5 @@
 import { type RefinementCtx, z } from "zod";
-import type { MetricDefinition, MetricValue } from "./metrics";
+import type { MetricDefinition, MetricType, MetricValue } from "./metrics";
 import {
 	type ColumnarFamily,
 	type ColumnarSampleSource,
@@ -26,8 +26,18 @@ export const COLUMNAR_METRIC_QUERIES = [
 
 export type ColumnarMetricQuery = (typeof COLUMNAR_METRIC_QUERIES)[number];
 
+export type DirectColumnarColumns = {
+	labels: Record<string, string[]>;
+	values: number[];
+	indexes: Map<string, number>;
+};
+
 export type ColumnarMetricSource = Omit<MetricDefinition, "values"> & {
 	values: Iterable<MetricValue>;
+	direct?: {
+		labels: readonly string[];
+		zones: Map<string, DirectColumnarColumns>;
+	};
 };
 
 const FamilyMetadataSchema = z.object({
@@ -210,13 +220,6 @@ export type PackedColumnarMetricState = z.infer<
 	typeof PackedColumnarMetricStateSchema
 >;
 
-type Row = {
-	labels: string[];
-	value: number;
-	misses?: number;
-	lastIngest?: number;
-};
-
 const STALE_MISSES = 5;
 
 export function isColumnarMetricQuery(
@@ -230,6 +233,7 @@ function rowKey(labels: readonly string[]) {
 }
 
 function metricLabels(metric: ColumnarMetricSource): string[] {
+	if (metric.direct !== undefined) return [...metric.direct.labels];
 	const labels = new Set<string>();
 	for (const sample of metric.values) {
 		for (const label of Object.keys(sample.labels)) {
@@ -290,131 +294,100 @@ function collectFamilyLabels(
 	return labelsByFamily;
 }
 
-function storedRows(
-	table: z.infer<typeof FamilyColumnsSchema> | undefined,
-	labelColumns: Record<string, string[]>,
-	labels: readonly string[],
-): Map<string, Row> {
-	const rows = new Map<string, Row>();
-	if (table === undefined) return rows;
-	for (let index = 0; index < table.values.length; index++) {
-		const values = labels.map((label) => labelColumns[label]?.[index] ?? "");
-		rows.set(rowKey(values), {
-			labels: values,
-			value: table.values[index] ?? 0,
-			misses: table.counter?.misses[index],
-			lastIngest: table.counter?.lastIngest[index],
-		});
-	}
-	return rows;
+function emptyColumns(labels: readonly string[]): DirectColumnarColumns {
+	return {
+		labels: Object.fromEntries(labels.map((label) => [label, []])),
+		values: [],
+		indexes: new Map(),
+	};
 }
 
-function observedRowsByZone(
+function addObservation(
+	columns: DirectColumnarColumns,
+	labels: readonly string[],
+	tuple: readonly string[],
+	value: number,
+	type: MetricType,
+) {
+	const key = rowKey(tuple);
+	const index = columns.indexes.get(key);
+	if (index === undefined) {
+		columns.indexes.set(key, columns.values.length);
+		columns.values.push(value);
+		for (const [labelIndex, label] of labels.entries()) {
+			columns.labels[label]?.push(tuple[labelIndex] ?? "");
+		}
+	} else if (type === "counter") {
+		columns.values[index] = (columns.values[index] ?? 0) + value;
+	} else {
+		columns.values[index] = Math.max(columns.values[index] ?? 0, value);
+	}
+}
+
+function observedColumnsByZone(
 	metrics: readonly ColumnarMetricSource[],
 	families: readonly FamilyMetadata[],
 	labelsByFamily: ReadonlyMap<number, readonly string[]>,
-): Map<string, Map<number, Map<string, Row>>> {
+): Map<string, Map<number, DirectColumnarColumns>> {
 	const familyIndexes = new Map(
 		families.map((family, index) => [family.name, index]),
 	);
-	const zones = new Map<string, Map<number, Map<string, Row>>>();
+	const zones = new Map<string, Map<number, DirectColumnarColumns>>();
 	for (const metric of metrics) {
 		const familyIndex = familyIndexes.get(metric.name);
 		const family =
 			familyIndex === undefined ? undefined : families[familyIndex];
 		if (familyIndex === undefined || family === undefined) continue;
-		for (const sample of metric.values) {
-			const zone = sample.labels.zone ?? "";
-			let tables = zones.get(zone);
-			if (tables === undefined) {
-				tables = new Map();
+		const labelNames = labelsByFamily.get(familyIndex) ?? [];
+		if (metric.direct !== undefined) {
+			for (const [zone, source] of metric.direct.zones) {
+				const tables = zones.get(zone) ?? new Map();
+				let columns = tables.get(familyIndex);
+				if (columns === undefined) {
+					columns = source;
+					for (const label of labelNames) {
+						columns.labels[label] ??= Array(columns.values.length).fill("");
+					}
+					columns.indexes.clear();
+					for (let index = 0; index < columns.values.length; index++) {
+						columns.indexes.set(
+							rowKey(
+								labelNames.map((label) => columns.labels[label]?.[index] ?? ""),
+							),
+							index,
+						);
+					}
+					tables.set(familyIndex, columns);
+				} else {
+					for (let index = 0; index < source.values.length; index++) {
+						const tuple = labelNames.map(
+							(label) => source.labels[label]?.[index] ?? "",
+						);
+						addObservation(
+							columns,
+							labelNames,
+							tuple,
+							source.values[index] ?? 0,
+							family.type,
+						);
+					}
+				}
 				zones.set(zone, tables);
 			}
-			let rows = tables.get(familyIndex);
-			if (rows === undefined) {
-				rows = new Map();
-				tables.set(familyIndex, rows);
-			}
-			const labels = (labelsByFamily.get(familyIndex) ?? []).map(
-				(label) => sample.labels[label] ?? "",
-			);
-			const key = rowKey(labels);
-			const old = rows.get(key);
-			if (old === undefined) {
-				rows.set(key, { labels, value: sample.value });
-			} else if (family.type === "counter") {
-				old.value += sample.value;
-			} else {
-				old.value = Math.max(old.value, sample.value);
-			}
+			metric.direct.zones.clear();
+			continue;
+		}
+		for (const sample of metric.values) {
+			const zone = sample.labels.zone ?? "";
+			const tables = zones.get(zone) ?? new Map();
+			const columns = tables.get(familyIndex) ?? emptyColumns(labelNames);
+			const tuple = labelNames.map((label) => sample.labels[label] ?? "");
+			addObservation(columns, labelNames, tuple, sample.value, family.type);
+			tables.set(familyIndex, columns);
+			zones.set(zone, tables);
 		}
 	}
 	return zones;
-}
-
-function mergeCounterRows(
-	previous: Map<string, Row>,
-	observed: Map<string, Row>,
-	ingestId: number,
-	ageMissing: boolean,
-) {
-	const rows = new Map<string, Row>();
-	for (const [key, old] of previous) {
-		const current = observed.get(key);
-		if (current !== undefined) {
-			observed.delete(key);
-			rows.set(key, {
-				labels: old.labels,
-				value: old.value + (old.lastIngest === ingestId ? 0 : current.value),
-				misses: STALE_MISSES,
-				lastIngest: ingestId,
-			});
-		} else if (!ageMissing || (old.misses ?? STALE_MISSES) > 1) {
-			rows.set(key, {
-				...old,
-				misses: ageMissing ? (old.misses ?? STALE_MISSES) - 1 : old.misses,
-			});
-		}
-	}
-	for (const [key, row] of observed) {
-		rows.set(key, {
-			...row,
-			misses: STALE_MISSES,
-			lastIngest: ingestId,
-		});
-	}
-	return rows;
-}
-
-function packRows(
-	familyIndex: number,
-	family: FamilyMetadata,
-	labelNames: readonly string[],
-	rows: Iterable<Row>,
-) {
-	const labels: Record<string, string[]> = Object.fromEntries(
-		labelNames.map((label) => [label, []]),
-	);
-	const values: number[] = [];
-	const misses: number[] = [];
-	const lastIngest: number[] = [];
-	for (const row of rows) {
-		values.push(row.value);
-		for (const [index, label] of labelNames.entries()) {
-			labels[label]?.push(row.labels[index] ?? "");
-		}
-		if (family.type === "counter") {
-			misses.push(row.misses ?? STALE_MISSES);
-			lastIngest.push(row.lastIngest ?? 0);
-		}
-	}
-	if (values.length === 0) return undefined;
-	return {
-		family: familyIndex,
-		labels,
-		values,
-		...(family.type === "counter" ? { counter: { misses, lastIngest } } : {}),
-	};
 }
 
 function resolveLabels(
@@ -455,7 +428,7 @@ export function accumulateColumnarMetricState(input: {
 	const previousZones = new Map(
 		(previous?.zones ?? []).map((zone) => [zone.zone, zone]),
 	);
-	const observedZones = observedRowsByZone(
+	const observedZones = observedColumnsByZone(
 		input.metrics,
 		families,
 		labelsByFamily,
@@ -471,31 +444,70 @@ export function accumulateColumnarMetricState(input: {
 			continue;
 		}
 		const tables = families.flatMap((family, familyIndex) => {
-			const labels = labelsByFamily.get(familyIndex) ?? [];
+			const labelNames = labelsByFamily.get(familyIndex) ?? [];
+			const current =
+				observedZones.get(zone)?.get(familyIndex) ?? emptyColumns(labelNames);
+			const { labels, values, indexes } = current;
+			if (family.type === "gauge") {
+				indexes.clear();
+				return values.length === 0
+					? []
+					: [{ family: familyIndex, labels, values }];
+			}
+
+			const misses = Array(values.length).fill(STALE_MISSES);
+			const lastIngest = Array(values.length).fill(input.ingestId);
 			const previousTable = previousZone?.families.find(
 				(table) => table.family === familyIndex,
 			);
-			const previousLabels =
-				previousZone === undefined || previousTable === undefined
-					? {}
-					: resolveLabels(previousZone, previousTable);
-			const observed =
-				observedZones.get(zone)?.get(familyIndex) ?? new Map<string, Row>();
-			const rows =
-				family.type === "counter"
-					? mergeCounterRows(
-							storedRows(previousTable, previousLabels, labels),
-							observed,
-							input.ingestId,
-							ageMissing,
-						)
-					: observed;
-			const packed = packRows(familyIndex, family, labels, rows.values());
-			return packed === undefined ? [] : [packed];
+			if (previousZone !== undefined && previousTable !== undefined) {
+				const previousLabels = resolveLabels(previousZone, previousTable);
+				for (
+					let oldIndex = 0;
+					oldIndex < previousTable.values.length;
+					oldIndex++
+				) {
+					const tuple = labelNames.map(
+						(label) => previousLabels[label]?.[oldIndex] ?? "",
+					);
+					const index = indexes.get(rowKey(tuple));
+					if (index !== undefined) {
+						values[index] =
+							(previousTable.values[oldIndex] ?? 0) +
+							(previousTable.counter?.lastIngest[oldIndex] === input.ingestId
+								? 0
+								: (values[index] ?? 0));
+						continue;
+					}
+					const oldMisses =
+						previousTable.counter?.misses[oldIndex] ?? STALE_MISSES;
+					if (ageMissing && oldMisses <= 1) continue;
+					for (const [labelIndex, label] of labelNames.entries()) {
+						labels[label]?.push(tuple[labelIndex] ?? "");
+					}
+					values.push(previousTable.values[oldIndex] ?? 0);
+					misses.push(ageMissing ? oldMisses - 1 : oldMisses);
+					lastIngest.push(previousTable.counter?.lastIngest[oldIndex] ?? 0);
+				}
+			}
+			indexes.clear();
+			return values.length === 0
+				? []
+				: [
+						{
+							family: familyIndex,
+							labels,
+							values,
+							counter: { misses, lastIngest },
+						},
+					];
 		});
 		if (tables.length > 0) {
 			zones.push({ zone, families: shareIdenticalLabels(tables) });
 		}
+	}
+	for (const tables of observedZones.values()) {
+		for (const columns of tables.values()) columns.indexes.clear();
 	}
 	return {
 		format: "metric-columnar-v1",

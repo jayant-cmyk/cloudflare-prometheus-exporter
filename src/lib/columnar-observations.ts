@@ -1,17 +1,15 @@
 import type { MetricDefinition, MetricType, MetricValue } from "./metrics";
-import type { ColumnarMetricSource } from "./packed-columnar-metric";
-
-export type ColumnarObservedRow = {
-	labels: string[];
-	value: number;
-};
+import type {
+	ColumnarMetricSource,
+	DirectColumnarColumns,
+} from "./packed-columnar-metric";
 
 export type ColumnarObservedFamily = {
 	name: string;
 	help: string;
 	type: MetricType;
 	labels: string[];
-	zones: Map<string, Map<string, ColumnarObservedRow>>;
+	zones: Map<string, DirectColumnarColumns>;
 };
 
 function rowKey(labels: readonly string[]) {
@@ -48,6 +46,9 @@ export class ColumnarObservationSink {
 					zones: new Map(),
 				};
 				this.families.set(metric.name, family);
+			} else {
+				family.help = metric.help;
+				family.type = metric.type;
 			}
 			metric.values = new ObservationValues((value) => this.add(family, value));
 		}
@@ -60,24 +61,8 @@ export class ColumnarObservationSink {
 				name: family.name,
 				help: family.help,
 				type: family.type,
-				values: {
-					*[Symbol.iterator](): Iterator<MetricValue> {
-						for (const [zone, rows] of family.zones) {
-							for (const row of rows.values()) {
-								yield {
-									labels: Object.fromEntries([
-										["zone", zone],
-										...family.labels.map((label, index) => [
-											label,
-											row.labels[index] ?? "",
-										]),
-									]),
-									value: row.value,
-								};
-							}
-						}
-					},
-				},
+				values: [],
+				direct: { labels: family.labels, zones: family.zones },
 			}));
 	}
 
@@ -87,31 +72,50 @@ export class ColumnarObservationSink {
 		);
 		if (discovered.length > 0) {
 			family.labels.push(...discovered);
-			for (const rows of family.zones.values()) {
-				const previous = [...rows.values()];
-				rows.clear();
-				for (const row of previous) {
-					row.labels.push(...discovered.map(() => ""));
-					rows.set(rowKey(row.labels), row);
+			for (const columns of family.zones.values()) {
+				for (const label of discovered) {
+					columns.labels[label] = Array(columns.values.length).fill("");
+				}
+				columns.indexes.clear();
+				for (let index = 0; index < columns.values.length; index++) {
+					columns.indexes.set(
+						rowKey(
+							family.labels.map(
+								(label) => columns.labels[label]?.[index] ?? "",
+							),
+						),
+						index,
+					);
 				}
 			}
 		}
 
 		const zone = sample.labels.zone ?? "";
-		let rows = family.zones.get(zone);
-		if (rows === undefined) {
-			rows = new Map();
-			family.zones.set(zone, rows);
+		let columns = family.zones.get(zone);
+		if (columns === undefined) {
+			columns = {
+				labels: Object.fromEntries(family.labels.map((label) => [label, []])),
+				values: [],
+				indexes: new Map(),
+			};
+			family.zones.set(zone, columns);
 		}
 		const labels = family.labels.map((label) => sample.labels[label] ?? "");
 		const key = rowKey(labels);
-		const existing = rows.get(key);
+		const existing = columns.indexes.get(key);
 		if (existing === undefined) {
-			rows.set(key, { labels, value: sample.value });
+			columns.indexes.set(key, columns.values.length);
+			columns.values.push(sample.value);
+			for (const [index, label] of family.labels.entries()) {
+				columns.labels[label]?.push(labels[index] ?? "");
+			}
 		} else if (family.type === "counter") {
-			existing.value += sample.value;
+			columns.values[existing] = (columns.values[existing] ?? 0) + sample.value;
 		} else {
-			existing.value = Math.max(existing.value, sample.value);
+			columns.values[existing] = Math.max(
+				columns.values[existing] ?? 0,
+				sample.value,
+			);
 		}
 	}
 }

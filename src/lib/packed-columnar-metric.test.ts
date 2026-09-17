@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ColumnarObservationSink } from "./columnar-observations";
 import type { MetricDefinition } from "./metrics";
 import {
 	accumulateColumnarMetricState,
@@ -36,7 +37,65 @@ function counter(value: number): MetricDefinition[] {
 	];
 }
 
+function direct(metrics: MetricDefinition[]) {
+	const sink = new ColumnarObservationSink();
+	const captured: MetricDefinition[] = metrics.map((metric) => ({
+		...metric,
+		values: [],
+	}));
+	sink.capture(captured);
+	for (const [index, metric] of metrics.entries()) {
+		captured[index]?.values.push(...metric.values);
+	}
+	return sink.finish();
+}
+
 describe("generic packed columnar metrics", () => {
+	it("writes observations directly into packed columns", () => {
+		const metrics = counter(10);
+		metrics[0]?.values.push({
+			labels: { zone: "example.com", method: "GET" },
+			value: 2,
+		});
+		metrics.push({
+			name: "request_duration",
+			help: "Request duration",
+			type: "gauge",
+			values: [1, 3, 2].map((value) => ({
+				labels: { zone: "example.com", method: "GET" },
+				value,
+			})),
+		});
+		const expected = accumulate("request-method-metrics", metrics, 1);
+		const source = direct(metrics);
+		let state = accumulateColumnarMetricState({
+			previous: undefined,
+			metrics: source,
+			ingestId: 1,
+			failedScopes: new Set(),
+		});
+		expect(state).toEqual(expected);
+		expect(source.every((metric) => metric.direct?.zones.size === 0)).toBe(
+			true,
+		);
+
+		const next = counter(4);
+		const nextExpected = accumulate(
+			"request-method-metrics",
+			next,
+			2,
+			expected,
+		);
+		state = accumulateColumnarMetricState({
+			previous: state,
+			metrics: direct(next),
+			ingestId: 2,
+			failedScopes: new Set(),
+		});
+		expect(state).toEqual(nextExpected);
+		expect(PackedColumnarMetricStateSchema.parse(state)).toEqual(state);
+	});
+
 	it("round-trips arbitrary families for every registered query", () => {
 		for (const query of COLUMNAR_METRIC_QUERIES) {
 			const metrics: MetricDefinition[] = [
