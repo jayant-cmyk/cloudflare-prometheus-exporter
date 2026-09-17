@@ -44,16 +44,27 @@ describe("metric-columnar-v1 integration", () => {
 			await initializeMetricExporter(accountId, "http-metrics", [zone]),
 		);
 
-		expect(snapshot.families).toMatchObject([
+		expect(snapshot.families.slice(0, 2)).toMatchObject([
 			{ name: "cloudflare_zone_requests_total", type: "counter" },
 			{ name: "cloudflare_zone_requests_cached", type: "gauge" },
-			{ name: "cloudflare_zone_cache_hit_ratio", type: "gauge" },
 		]);
-		expect(snapshot.zones[0]?.families.map((family) => family.values)).toEqual([
-			[5],
-			[2],
-			[0.4],
-		]);
+		expect(snapshot.families.at(-1)).toMatchObject({
+			name: "cloudflare_zone_cache_hit_ratio",
+			type: "gauge",
+		});
+		const valuesByName = new Map(
+			snapshot.zones[0]?.families.map((table) => [
+				snapshot.families[table.family]?.name,
+				table.values,
+			]),
+		);
+		expect(valuesByName).toEqual(
+			new Map([
+				["cloudflare_zone_requests_total", [5]],
+				["cloudflare_zone_requests_cached", [2]],
+				["cloudflare_zone_cache_hit_ratio", [0.4]],
+			]),
+		);
 	});
 
 	it("stores an account-scoped GraphQL counter", async () => {
@@ -148,12 +159,12 @@ describe("metric-columnar-v1 integration", () => {
 			zone: zone.name,
 			families: [
 				{ family: 0, labels: { host: ["example.com"] }, values: [12] },
-				{ family: 1, labels: {}, labelsFrom: 0, values: [0.1] },
-				{ family: 2, labels: {}, labelsFrom: 0, values: [0.08] },
-				{ family: 3, labels: {}, labelsFrom: 0, values: [0.18] },
-				{ family: 4, labels: {}, labelsFrom: 0, values: [0.2] },
-				{ family: 5, labels: {}, labelsFrom: 0, values: [0.15] },
-				{ family: 6, labels: {}, labelsFrom: 0, values: [0.35] },
+				{ family: 3, labels: {}, labelsFrom: 0, values: [0.1] },
+				{ family: 4, labels: {}, labelsFrom: 0, values: [0.08] },
+				{ family: 5, labels: {}, labelsFrom: 0, values: [0.18] },
+				{ family: 6, labels: {}, labelsFrom: 0, values: [0.2] },
+				{ family: 7, labels: {}, labelsFrom: 0, values: [0.15] },
+				{ family: 8, labels: {}, labelsFrom: 0, values: [0.35] },
 			],
 		});
 	});

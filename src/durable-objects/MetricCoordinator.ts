@@ -261,10 +261,6 @@ export class MetricCoordinator extends DurableObject<Env> {
 			}
 		}
 
-		yield* serializePackedMetrics(packedMetricStates, {
-			denylist: metricsDenylist,
-			excludeLabels,
-		});
 		const remaining = serializeToPrometheus(
 			[
 				...this.buildExporterInfoMetrics(
@@ -280,6 +276,10 @@ export class MetricCoordinator extends DurableObject<Env> {
 			},
 		);
 		if (remaining.length > 0) yield `${remaining}\n`;
+		yield* serializePackedMetrics(packedMetricStates, {
+			denylist: metricsDenylist,
+			excludeLabels,
+		});
 		logger.info("Metrics streamed successfully");
 	}
 

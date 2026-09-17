@@ -55,15 +55,13 @@ export class ColumnarObservationSink {
 	}
 
 	finish(): ColumnarMetricSource[] {
-		return [...this.families.values()]
-			.filter((family) => family.zones.size > 0)
-			.map((family) => ({
-				name: family.name,
-				help: family.help,
-				type: family.type,
-				values: [],
-				direct: { labels: family.labels, zones: family.zones },
-			}));
+		return [...this.families.values()].map((family) => ({
+			name: family.name,
+			help: family.help,
+			type: family.type,
+			values: [],
+			direct: { labels: family.labels, zones: family.zones },
+		}));
 	}
 
 	private add(family: ColumnarObservedFamily, sample: MetricValue) {

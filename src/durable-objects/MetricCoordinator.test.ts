@@ -120,6 +120,19 @@ afterEach(() => {
 });
 
 describe("MetricCoordinator packed colo output", () => {
+	it("emits exporter families before packed zone families", async () => {
+		const coordinator = await createCoordinator([
+			packedState([{ host: "www.example.com", value: 1 }]),
+		]);
+		const text = await (
+			await coordinator.fetch(new Request("https://test/export"))
+		).text();
+
+		expect(text.indexOf("# HELP cloudflare_exporter_up")).toBeLessThan(
+			text.indexOf("# HELP cloudflare_zone_colocation_visits_total"),
+		);
+	});
+
 	it.each([
 		false,
 		true,

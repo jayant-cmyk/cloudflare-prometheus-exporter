@@ -51,6 +51,171 @@ function direct(metrics: MetricDefinition[]) {
 }
 
 describe("generic packed columnar metrics", () => {
+	it("retains empty families in declaration order", () => {
+		const source = direct([
+			{
+				name: "first_total",
+				help: "First",
+				type: "counter",
+				values: [],
+			},
+			{
+				name: "second_total",
+				help: "Second",
+				type: "counter",
+				values: [{ labels: { zone: "example.com" }, value: 1 }],
+			},
+		]);
+
+		expect(source.map((family) => family.name)).toEqual([
+			"first_total",
+			"second_total",
+		]);
+	});
+
+	it("reindexes migrated families into current declaration order", () => {
+		const metric = (name: string, value: number): MetricDefinition => ({
+			name,
+			help: name,
+			type: "counter",
+			values: [{ labels: { zone: "example.com", method: "GET" }, value }],
+		});
+		const previous = accumulate(
+			"http-metrics",
+			[metric("second_total", 10), metric("third_total", 20)],
+			1,
+		);
+		const state = accumulate(
+			"http-metrics",
+			[
+				metric("first_total", 1),
+				metric("second_total", 1),
+				metric("third_total", 2),
+			],
+			2,
+			previous,
+		);
+
+		expect(state.families.map((family) => family.name)).toEqual([
+			"first_total",
+			"second_total",
+			"third_total",
+		]);
+		expect(state.zones[0]?.families.map((table) => table.family)).toEqual([
+			0, 1, 2,
+		]);
+		expect(state.zones[0]?.families[2]?.labelsFrom).toBe(0);
+		expect(state.zones[0]?.families.map((table) => table.values)).toEqual([
+			[1],
+			[11],
+			[22],
+		]);
+		expect(PackedColumnarMetricStateSchema.parse(state)).toEqual(state);
+
+		const failed = accumulate(
+			"http-metrics",
+			[
+				metric("first_total", 1),
+				metric("second_total", 1),
+				metric("third_total", 1),
+			],
+			3,
+			previous,
+			new Set(["example.com"]),
+		);
+		expect(failed.zones[0]?.families.map((table) => table.family)).toEqual([
+			1, 2,
+		]);
+		expect(failed.zones[0]?.families[1]?.labelsFrom).toBe(1);
+		expect(PackedColumnarMetricStateSchema.parse(failed)).toEqual(failed);
+	});
+
+	it("orders families by their first emitting state", () => {
+		const family = (name: string, value?: number): MetricDefinition => ({
+			name,
+			help: name,
+			type: "counter",
+			values:
+				value === undefined ? [] : [{ labels: { zone: "example.com" }, value }],
+		});
+		const first = accumulate(
+			"http-metrics",
+			[family("first_total"), family("second_total", 1)],
+			1,
+		);
+		const second = accumulate(
+			"http-metrics",
+			[family("first_total", 1), family("second_total", 1)],
+			1,
+		);
+		const output = [...serializeColumnarMetricStates([first, second], {})].join(
+			"",
+		);
+
+		expect(output.indexOf("# HELP second_total")).toBeLessThan(
+			output.indexOf("# HELP first_total"),
+		);
+	});
+
+	it("drops stale counters when a family changes type", () => {
+		const previous = accumulate(
+			"http-metrics",
+			[
+				{
+					name: "source",
+					help: "Source",
+					type: "counter",
+					values: [
+						{
+							labels: { zone: "example.com", method: "GET" },
+							value: 10,
+						},
+					],
+				},
+				{
+					name: "dependent_total",
+					help: "Dependent",
+					type: "counter",
+					values: [
+						{
+							labels: { zone: "example.com", method: "GET" },
+							value: 20,
+						},
+					],
+				},
+			],
+			1,
+		);
+		const state = accumulate(
+			"http-metrics",
+			[
+				{
+					name: "source",
+					help: "Source",
+					type: "gauge",
+					values: [
+						{
+							labels: { zone: "example.com", method: "POST" },
+							value: 3,
+						},
+					],
+				},
+			],
+			2,
+			previous,
+		);
+
+		expect(state.zones[0]?.families[0]?.counter).toBeUndefined();
+		expect(state.zones[0]?.families[0]?.values).toEqual([3]);
+		expect(state.zones[0]?.families[1]).toMatchObject({
+			family: 1,
+			labels: { method: ["GET"] },
+			values: [20],
+		});
+		expect(state.zones[0]?.families[1]?.labelsFrom).toBeUndefined();
+		expect(PackedColumnarMetricStateSchema.parse(state)).toEqual(state);
+	});
+
 	it("writes observations directly into packed columns", () => {
 		const metrics = counter(10);
 		metrics[0]?.values.push({

@@ -247,10 +247,8 @@ function collectFamilies(
 	previous: PackedColumnarMetricState | undefined,
 	metrics: readonly ColumnarMetricSource[],
 ): FamilyMetadata[] {
-	const families = previous?.families.map((family) => ({ ...family })) ?? [];
-	const indexes = new Map(
-		families.map((family, index) => [family.name, index]),
-	);
+	const families: FamilyMetadata[] = [];
+	const indexes = new Map<string, number>();
 	for (const metric of metrics) {
 		const current = {
 			name: metric.name,
@@ -265,7 +263,60 @@ function collectFamilies(
 			families[index] = current;
 		}
 	}
+	for (const family of previous?.families ?? []) {
+		if (!indexes.has(family.name)) {
+			indexes.set(family.name, families.length);
+			families.push({ ...family });
+		}
+	}
 	return families;
+}
+
+function reindexPreviousState(
+	previous: PackedColumnarMetricState | undefined,
+	families: readonly FamilyMetadata[],
+): PackedColumnarMetricState | undefined {
+	if (previous === undefined) return undefined;
+	const indexes = new Map(
+		families.map((family, index) => [family.name, index]),
+	);
+	const oldToNew = previous.families.map((family) => {
+		const index = indexes.get(family.name);
+		return index !== undefined && families[index]?.type === family.type
+			? index
+			: undefined;
+	});
+	return {
+		...previous,
+		families: [...families],
+		zones: previous.zones.map((zone) => ({
+			...zone,
+			families: zone.families
+				.flatMap((table) => {
+					const family = oldToNew[table.family];
+					if (family === undefined) return [];
+					const labelsFrom =
+						table.labelsFrom === undefined
+							? undefined
+							: oldToNew[table.labelsFrom];
+					return [
+						{
+							...table,
+							family,
+							...(table.labelsFrom === undefined
+								? {}
+								: labelsFrom === undefined
+									? {
+											labels: resolveLabels(zone, table),
+											labelsFrom: undefined,
+										}
+									: { labelsFrom }),
+						},
+					];
+				})
+				.sort((left, right) => left.family - right.family),
+		})),
+	};
 }
 
 function collectFamilyLabels(
@@ -422,8 +473,8 @@ export function accumulateColumnarMetricState(input: {
 	ingestId: number;
 	failedScopes: ReadonlySet<string>;
 }): PackedColumnarMetricState {
-	const previous = input.previous;
-	const families = collectFamilies(previous, input.metrics);
+	const families = collectFamilies(input.previous, input.metrics);
+	const previous = reindexPreviousState(input.previous, families);
 	const labelsByFamily = collectFamilyLabels(previous, input.metrics, families);
 	const previousZones = new Map(
 		(previous?.zones ?? []).map((zone) => [zone.zone, zone]),
@@ -553,8 +604,17 @@ export function* serializeColumnarMetricStates(
 	const families = new Map<string, FamilyMetadata>();
 	const labelsByFamily = new Map<string, string[]>();
 	for (const state of states) {
-		for (const family of state.families) {
-			if (!families.has(family.name)) families.set(family.name, family);
+		const populatedFamilies = new Set(
+			state.zones.flatMap((zone) =>
+				zone.families
+					.filter((table) => table.values.length > 0)
+					.map((table) => table.family),
+			),
+		);
+		for (const [index, family] of state.families.entries()) {
+			if (populatedFamilies.has(index) && !families.has(family.name)) {
+				families.set(family.name, family);
+			}
 		}
 		for (const zone of state.zones) {
 			for (const table of zone.families) {
