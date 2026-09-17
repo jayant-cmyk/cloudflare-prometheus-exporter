@@ -15,26 +15,69 @@ function createClient(fetch: typeof globalThis.fetch): CloudflareMetricsClient {
 }
 
 describe("CloudflareMetricsClient", () => {
-	it("preserves the legacy HTTP query shape when packed storage is disabled", async () => {
+	it.each([
+		false,
+		true,
+	])("keeps HTTP metrics grouped by datetime when packed storage=%s", async (packed) => {
 		const client = createClient(async (input, init) => {
 			const body = z
 				.object({
 					query: z.string(),
-					variables: z.object({ packed: z.boolean() }),
 				})
 				.parse(await new Request(input, init).json());
-			expect(body.variables.packed).toBe(false);
-			expect(body.query).toContain("datetime @skip(if: $packed)");
-			return Response.json({ data: { viewer: { zones: [] } } });
+			expect(body.query).toContain("datetime");
+			expect(body.query).not.toContain("@skip");
+			return Response.json({
+				data: {
+					viewer: {
+						zones: [
+							{
+								zoneTag: "zone-id",
+								httpRequests1mGroups: [
+									{
+										dimensions: { datetime: "2026-01-01T00:00:00Z" },
+										sum: { requests: 1 },
+									},
+									{
+										dimensions: { datetime: "2026-01-01T00:01:00Z" },
+										sum: { requests: 2 },
+									},
+								],
+								firewallEventsAdaptiveGroups: [],
+							},
+						],
+					},
+				},
+			});
 		});
 
-		await client.getZoneMetrics(
+		const metrics = await client.getZoneMetrics(
 			"http-metrics",
 			["zone-id"],
-			[],
+			[
+				{
+					id: "zone-id",
+					name: "example.com",
+					status: "active",
+					plan: { id: "paid", name: "Paid" },
+					account: { id: "account-id", name: "Account" },
+				},
+			],
 			{},
-			{ mintime: "2026-01-01T00:00:00Z", maxtime: "2026-01-01T00:01:00Z" },
+			{
+				mintime: "2026-01-01T00:00:00Z",
+				maxtime: "2026-01-01T00:02:00Z",
+			},
+			undefined,
+			undefined,
+			false,
+			packed,
 		);
+
+		expect(
+			metrics.find((metric) => metric.name === "cloudflare_zone_requests_total")
+				?.values,
+		).toEqual([{ labels: { zone: "example.com" }, value: 1 }]);
 	});
 
 	it("parses the legacy load-balancer response when packed storage is disabled", async () => {

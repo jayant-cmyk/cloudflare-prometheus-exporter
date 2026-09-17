@@ -242,7 +242,6 @@ export class CloudflareMetricsClient {
 			limit: input.limit,
 			maxtime: input.maxtime.toISOString(),
 			mintime: input.mintime.toISOString(),
-			packed: false,
 			zoneIDs: input.zoneIds,
 		});
 
@@ -1520,7 +1519,6 @@ export class CloudflareMetricsClient {
 					firewallMap,
 					timeRange,
 					httpStatusGroup,
-					packedMetricStorage,
 					observationSink,
 				);
 			case "adaptive-metrics":
@@ -1659,7 +1657,6 @@ export class CloudflareMetricsClient {
 		firewallRules: Map<string, string>,
 		timeRange: TimeRange,
 		httpStatusGroup: boolean,
-		packedMetricStorage: boolean,
 		observationSink?: ColumnarObservationSink,
 	): Promise<MetricDefinition[]> {
 		const queryVars = {
@@ -1667,7 +1664,6 @@ export class CloudflareMetricsClient {
 			mintime: timeRange.mintime,
 			maxtime: timeRange.maxtime,
 			limit: this.config.queryLimit,
-			packed: packedMetricStorage,
 		};
 
 		let result = await this.gql.query(HTTPMetricsQuery, queryVars);

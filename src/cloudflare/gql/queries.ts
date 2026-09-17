@@ -6,7 +6,6 @@ export const HTTPMetricsQuery = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
-    $packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -64,7 +63,7 @@ export const HTTPMetricsQuery = graphql(`
             }
           }
           dimensions {
-            datetime @skip(if: $packed)
+            datetime
           }
         }
         firewallEventsAdaptiveGroups(
@@ -93,7 +92,6 @@ export const HTTPMetricsQueryNoBots = graphql(`
     $mintime: Time!
     $maxtime: Time!
     $limit: uint64!
-    $packed: Boolean!
   ) {
     viewer {
       zones(filter: { zoneTag_in: $zoneIDs }) {
@@ -151,7 +149,7 @@ export const HTTPMetricsQueryNoBots = graphql(`
             }
           }
           dimensions {
-            datetime @skip(if: $packed)
+            datetime
           }
         }
         firewallEventsAdaptiveGroups(
