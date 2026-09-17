@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { FREE_PLAN_ID } from "../lib/filters";
 import { PackedColumnarMetricStateSchema } from "../lib/packed-columnar-metric";
 import { MetricExporter } from "./MetricExporter";
 
@@ -86,6 +87,88 @@ afterEach(() => {
 });
 
 describe("MetricExporter state recovery", () => {
+	it("caches a successful empty legacy snapshot", async () => {
+		const storage = new AlarmStorage();
+		const zone = {
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		};
+		storage.values.set("state", {
+			...storedState(),
+			scopeType: "zone",
+			scopeId: zone.id,
+			queryName: "lb-weight-metrics",
+			zoneMetadata: zone,
+			processedZoneMode: "legacy",
+			lastSslFetch: Date.now(),
+		});
+		const fetch = vi.fn<typeof globalThis.fetch>();
+		vi.stubGlobal("fetch", fetch);
+		const { exporter, ready } = createExporter(storage, {
+			CLOUDFLARE_API_TOKEN: "token",
+			CONFIG_KV: { get: vi.fn().mockResolvedValue(null) },
+			CF_API_RATE_LIMITER: {
+				limit: vi.fn().mockResolvedValue({ success: true }),
+			},
+		});
+		await ready;
+
+		await exporter.triggerRefresh({
+			mintime: "2026-01-01T00:00:00.000Z",
+			maxtime: "2026-01-01T00:01:00.000Z",
+		});
+
+		expect(fetch).not.toHaveBeenCalled();
+		expect(storage.setAlarm).toHaveBeenCalledOnce();
+	});
+
+	it("refreshes a packed cache marker when its snapshot is missing", async () => {
+		const storage = new AlarmStorage();
+		const zone = {
+			id: "zone-id",
+			name: "example.com",
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		};
+		storage.values.set("state", {
+			...storedState(),
+			scopeType: "zone",
+			scopeId: zone.id,
+			queryName: "lb-weight-metrics",
+			zoneMetadata: zone,
+			processedZoneMode: "packed",
+			lastSslFetch: Date.now(),
+		});
+		const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+			Response.json({
+				success: true,
+				result: [],
+				result_info: { page: 1, per_page: 20, count: 0, total_count: 0 },
+			}),
+		);
+		vi.stubGlobal("fetch", fetch);
+		const { exporter, ready } = createExporter(storage, {
+			CLOUDFLARE_API_TOKEN: "token",
+			PACKED_METRIC_STORAGE: true,
+			CONFIG_KV: { get: vi.fn().mockResolvedValue(null) },
+			CF_API_RATE_LIMITER: {
+				limit: vi.fn().mockResolvedValue({ success: true }),
+			},
+		});
+		await ready;
+
+		await exporter.triggerRefresh({
+			mintime: "2026-01-01T00:00:00.000Z",
+			maxtime: "2026-01-01T00:01:00.000Z",
+		});
+
+		expect(fetch).toHaveBeenCalled();
+	});
+
 	it("schedules recovery when constructor state loading keeps failing", async () => {
 		const storage = new AlarmStorage();
 		storage.getManyFailures = 2;
@@ -426,18 +509,17 @@ async function createColumnarHarness(packed: boolean) {
 	const storage = new AlarmStorage();
 	let packedStorage = packed;
 	let fetchObserver: ((packedStateExists: boolean) => void) | undefined;
+	const zone = {
+		id: "zone-id",
+		name: "example.com",
+		status: "active",
+		plan: { id: "paid", name: "Paid" },
+		account: { id: "account-id", name: "Account" },
+	};
 	storage.values.set("state", {
 		...storedState(),
 		queryName: "request-method-metrics",
-		zones: [
-			{
-				id: "zone-id",
-				name: "example.com",
-				status: "active",
-				plan: { id: "paid", name: "Paid" },
-				account: { id: "account-id", name: "Account" },
-			},
-		],
+		zones: [zone],
 	});
 	vi.stubGlobal("fetch", async () => {
 		fetchObserver?.(storage.values.has("packed-colo-metrics"));
@@ -481,6 +563,18 @@ async function createColumnarHarness(packed: boolean) {
 		observeFetch(observer: (packedStateExists: boolean) => void) {
 			fetchObserver = observer;
 		},
+		async markZoneFree() {
+			await exporter.updateZoneContext(
+				"account-id",
+				"Account",
+				[{ ...zone, plan: { id: FREE_PLAN_ID, name: "Free" } }],
+				{},
+				{
+					mintime: "2026-01-01T00:00:00.000Z",
+					maxtime: "2026-01-01T00:01:00.000Z",
+				},
+			);
+		},
 		async restart() {
 			({ exporter, ready } = createExporter(storage, env));
 			await ready;
@@ -495,6 +589,21 @@ async function createColumnarHarness(packed: boolean) {
 }
 
 describe("MetricExporter packed columnar storage", () => {
+	it("ages packed counters when no paid zones remain", async () => {
+		const h = await createColumnarHarness(true);
+		await h.refresh(1);
+		await h.markZoneFree();
+
+		await h.refresh(2);
+
+		const snapshot = PackedColumnarMetricStateSchema.parse(
+			await h.exporter.exportPackedMetrics(),
+		);
+		expect(snapshot.lastIngest).toBe(1735689720000);
+		expect(snapshot.zones[0]?.families[0]?.values).toEqual([10]);
+		expect(snapshot.zones[0]?.families[0]?.counter?.misses).toEqual([4]);
+	});
+
 	it("persists the unpacked migration before fetching packed metrics", async () => {
 		const h = await createColumnarHarness(false);
 		await h.refresh(1);

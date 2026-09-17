@@ -101,6 +101,16 @@ type MetricFetchResult = {
 	zoneRetryAfter: Record<string, number>;
 };
 
+function emptyMetricFetchResult(packed: boolean): MetricFetchResult {
+	return {
+		metrics: [],
+		...(packed ? { packedMetrics: [] } : {}),
+		partialErrors: [],
+		failedScopes: new Set(),
+		zoneRetryAfter: {},
+	};
+}
+
 function metricZones(metrics: readonly MetricDefinition[]): string[] {
 	const zones = new Set<string>();
 	for (const metric of metrics) {
@@ -403,8 +413,10 @@ export class MetricExporter extends DurableObject<Env> {
 			const cacheAgeMs = Date.now() - state.lastSslFetch;
 			const cacheTtlMs = config.sslCertsCacheTtlSeconds * 1000;
 			const hasCurrentRepresentation = usePackedStorage
-				? (await this.loadPackedMetricState()) !== undefined
-				: state.metrics.length > 0;
+				? state.processedZoneMode !== "legacy" &&
+					(await this.loadPackedMetricState()) !== undefined
+				: state.processedZoneMode === "legacy" ||
+					(state.processedZoneMode === undefined && state.metrics.length > 0);
 			if (
 				state.lastSslFetch > 0 &&
 				cacheAgeMs < cacheTtlMs &&
@@ -624,6 +636,8 @@ export class MetricExporter extends DurableObject<Env> {
 
 		// Zone-batched queries - fetch all zones in one GraphQL call
 		if (isZoneLevelQuery(queryName)) {
+			const usePackedStorage =
+				isPackedMetricQuery(queryName) && config.packedMetricStorage;
 			// Hostname metrics guardrails: parse allowlist once for both guard + query
 			let hostMetricsAllowlist: ReadonlySet<string> | undefined;
 			let hostMetricsDelaySeconds: number | undefined;
@@ -633,24 +647,14 @@ export class MetricExporter extends DurableObject<Env> {
 				const normalized = new Set([...parsed].map((h) => h.toLowerCase()));
 				if (normalized.size === 0) {
 					logger.debug("Hostname metrics disabled: empty allowlist");
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				if (normalized.size > MAX_HOSTNAME_ALLOWLIST_SIZE) {
 					logger.error("Hostname allowlist exceeds maximum size", {
 						size: normalized.size,
 						max: MAX_HOSTNAME_ALLOWLIST_SIZE,
 					});
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				// excludeHost strips host labels from all metrics in prometheus.ts,
 				// which would collapse distinct hostnames into duplicate gauge series
@@ -659,12 +663,7 @@ export class MetricExporter extends DurableObject<Env> {
 					logger.warn(
 						"Hostname metrics disabled: excludeHost=true strips host labels",
 					);
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 				hostMetricsAllowlist = normalized;
 				hostMetricsDelaySeconds = config.hostMetricsDelaySeconds;
@@ -686,12 +685,7 @@ export class MetricExporter extends DurableObject<Env> {
 
 				if (zonesToQuery.length === 0) {
 					logger.info("No paid tier zones to query");
-					return {
-						metrics: [],
-						partialErrors: [],
-						failedScopes: new Set(),
-						zoneRetryAfter: {},
-					};
+					return emptyMetricFetchResult(usePackedStorage);
 				}
 			}
 
