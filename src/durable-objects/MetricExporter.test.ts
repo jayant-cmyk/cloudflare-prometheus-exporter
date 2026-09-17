@@ -97,7 +97,10 @@ describe("MetricExporter state recovery", () => {
 		expect(storage.setAlarm).toHaveBeenCalledOnce();
 	});
 
-	it("backs off only a denied zone chunk while refreshing successful chunks", async () => {
+	it.each([
+		false,
+		true,
+	])("backs off only a denied zone chunk while refreshing successful chunks with packed storage=%s", async (packedMetricStorage) => {
 		const storage = new AlarmStorage();
 		const zones = Array.from({ length: 11 }, (_, index) => ({
 			id: `zone-${index}`,
@@ -138,10 +141,12 @@ describe("MetricExporter state recovery", () => {
 			CLOUDFLARE_API_TOKEN: "token",
 			CONFIG_KV: { get: vi.fn().mockResolvedValue(null) },
 			CF_API_RATE_LIMITER: rateLimiter,
+			PACKED_METRIC_STORAGE: packedMetricStorage,
 		});
 		await ready;
 
 		await exporter.alarm();
+		expect(storage.values.get("state")).toMatchObject({ lastError: null });
 		await exporter.alarm();
 
 		expect(fetch).toHaveBeenCalledTimes(3);

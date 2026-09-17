@@ -803,7 +803,11 @@ export class MetricExporter extends DurableObject<Env> {
 				}
 			}
 
-			if (chunkResults.length === 0 && firstChunkError !== undefined) {
+			if (
+				chunkResults.length === 0 &&
+				packedMetrics === undefined &&
+				firstChunkError !== undefined
+			) {
 				throw longestRetryError ?? firstChunkError;
 			}
 			return {
