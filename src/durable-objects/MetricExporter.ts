@@ -22,7 +22,10 @@ import {
 	MetricDefinitionSchema,
 	mergeMetricDefinitions,
 } from "../lib/metrics";
-import type { ColumnarMetricSource } from "../lib/packed-columnar-metric";
+import {
+	type ColumnarMetricSource,
+	serializeColumnarMetricStates,
+} from "../lib/packed-columnar-metric";
 import {
 	accumulatePackedMetricState,
 	isPackedMetricQuery,
@@ -30,6 +33,10 @@ import {
 	type PackedMetricState,
 	PackedMetricStateSchema,
 } from "../lib/packed-metric-state";
+import {
+	createPrometheusStream,
+	serializeToPrometheusChunks,
+} from "../lib/prometheus";
 import { getConfig, type ResolvedConfig } from "../lib/runtime-config";
 import { getTimeRange } from "../lib/time";
 import {
@@ -62,6 +69,8 @@ const MetricExporterStateSchema = z.object({
 	counters: z.record(z.string(), CounterStateSchema),
 	metrics: z.array(MetricDefinitionSchema),
 	lastIngest: z.number(),
+	processedZones: z.array(z.string()).optional(),
+	processedZoneMode: z.enum(["legacy", "packed"]).optional(),
 
 	// Context for fetching (account-scoped)
 	accountId: z.string(),
@@ -91,6 +100,17 @@ type MetricFetchResult = {
 	failedScopes: ReadonlySet<string>;
 	zoneRetryAfter: Record<string, number>;
 };
+
+function metricZones(metrics: readonly MetricDefinition[]): string[] {
+	const zones = new Set<string>();
+	for (const metric of metrics) {
+		for (const value of metric.values) {
+			const zone = value.labels.zone;
+			if (zone) zones.add(zone);
+		}
+	}
+	return [...zones];
+}
 
 /**
  * Durable Object that fetches and exports Prometheus metrics for a specific query scope.
@@ -200,6 +220,7 @@ export class MetricExporter extends DurableObject<Env> {
 			counters: {},
 			metrics: [],
 			lastIngest: 0,
+			processedZones: [],
 			accountId: "",
 			accountName: "",
 			zones: [],
@@ -457,7 +478,7 @@ export class MetricExporter extends DurableObject<Env> {
 					);
 				}
 				const currentState = this.getState();
-				await this.savePackedMetricState(
+				const packedState = await this.savePackedMetricState(
 					result.packedMetrics,
 					ingestId,
 					result.failedScopes,
@@ -467,6 +488,8 @@ export class MetricExporter extends DurableObject<Env> {
 					metrics: [],
 					counters: {},
 					lastIngest: ingestId,
+					processedZones: packedState.zones.map((zone) => zone.zone),
+					processedZoneMode: "packed",
 					lastRefresh: Date.now(),
 					lastSslFetch:
 						state.scopeType === "zone" ? Date.now() : currentState.lastSslFetch,
@@ -507,6 +530,8 @@ export class MetricExporter extends DurableObject<Env> {
 				metrics: processed.metrics,
 				counters: processed.counters,
 				lastIngest: ingestId,
+				processedZones: metricZones(processed.metrics),
+				processedZoneMode: "legacy",
 				lastRefresh: Date.now(),
 				lastSslFetch:
 					state.scopeType === "zone" ? Date.now() : currentState.lastSslFetch,
@@ -904,7 +929,7 @@ export class MetricExporter extends DurableObject<Env> {
 		metrics: ColumnarMetricSource[],
 		ingestId: number,
 		failedScopes: ReadonlySet<string>,
-	): Promise<void> {
+	): Promise<PackedMetricState> {
 		const previous = await this.loadOrMigratePackedMetricState();
 		const packed = accumulatePackedMetricState({
 			previous,
@@ -917,6 +942,7 @@ export class MetricExporter extends DurableObject<Env> {
 			PACKED_METRIC_STATE_KEY,
 			packed,
 		);
+		return packed;
 	}
 
 	/** Persist state in bounded storage chunks before publishing it in memory. */
@@ -935,6 +961,57 @@ export class MetricExporter extends DurableObject<Env> {
 	 */
 	async export(): Promise<MetricDefinition[]> {
 		return this.getState().metrics;
+	}
+
+	/** Return only the zone summary needed for exporter health metrics. */
+	async exportProcessedZones(mode: "legacy" | "packed"): Promise<string[]> {
+		const state = this.getState();
+		if (
+			state.processedZoneMode === mode &&
+			state.processedZones !== undefined
+		) {
+			return state.processedZones;
+		}
+		if (mode === "legacy") return metricZones(state.metrics);
+		const packed = await this.loadOrMigratePackedMetricState();
+		return packed?.zones.map((zone) => zone.zone) ?? [];
+	}
+
+	/** Stream one cached snapshot without crossing the RPC value-size limit. */
+	async exportPrometheus(options: {
+		packed: boolean;
+		denylist: string[];
+		excludeLabels: string[];
+	}): Promise<Response> {
+		const chunks = this.exportPrometheusChunks(options);
+		return new Response(createPrometheusStream(chunks), {
+			headers: { "Content-Type": "text/plain; charset=utf-8" },
+		});
+	}
+
+	private async *exportPrometheusChunks(options: {
+		packed: boolean;
+		denylist: string[];
+		excludeLabels: string[];
+	}): AsyncGenerator<string, void> {
+		const serializeOptions = {
+			denylist: new Set(options.denylist),
+			excludeLabels: new Set(options.excludeLabels),
+		};
+		if (options.packed) {
+			const packed = await this.exportPackedMetrics({
+				migrateLegacyMetrics: true,
+			});
+			if (packed !== undefined) {
+				yield* serializeColumnarMetricStates([packed], serializeOptions);
+			}
+			return;
+		}
+
+		yield* serializeToPrometheusChunks(
+			this.getState().metrics,
+			serializeOptions,
+		);
 	}
 
 	/** Packed counters, optionally migrated from the currently exported metrics. */

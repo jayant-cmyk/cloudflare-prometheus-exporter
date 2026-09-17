@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MetricDefinition } from "../lib/metrics";
+import { serializeColumnarMetricStates } from "../lib/packed-columnar-metric";
 import {
 	accumulatePackedMetricState,
 	type PackedMetricState,
@@ -49,6 +50,7 @@ async function createCoordinator(
 		metricsDenylist?: string;
 		coloMetricsPackedStorage?: boolean;
 	} = {},
+	onPackedExport: (index: number) => void = () => {},
 ) {
 	let ready = Promise.resolve();
 	const ctx = {
@@ -83,17 +85,54 @@ async function createCoordinator(
 				}) => {
 					const packedStorage =
 						options.packedMetricQueries.includes("colo-metrics");
-					return {
-						metrics: id === "account:account-a" || packedStorage ? [] : legacy,
-						packedMetricStates:
-							id === "account:account-a" && packedStorage ? packedStates : [],
-						zoneCounts: {
-							total: 1,
-							filtered: 1,
-							processed: 1,
-							skippedFreeTier: 0,
-						},
+					const serializeOptions = {
+						denylist: new Set(
+							overrides.metricsDenylist ? [overrides.metricsDenylist] : [],
+						),
+						excludeLabels: overrides.excludeHost
+							? new Set(["host"])
+							: undefined,
 					};
+					const states = packedStorage
+						? id === "account:account-a"
+							? packedStates
+									.slice(0, 1)
+									.map((state, index) => ({ state, index }))
+							: packedStates.slice(1).map((state, index) => ({
+									state,
+									index: index + 1,
+								}))
+						: [];
+					const chunks = (function* () {
+						for (const { state, index } of states) {
+							try {
+								onPackedExport(index);
+								yield* serializeColumnarMetricStates([state], serializeOptions);
+							} catch {}
+						}
+						if (id === "account:account-b" && !packedStorage) {
+							yield serializeToPrometheus(legacy, serializeOptions);
+						}
+					})();
+					const encoder = new TextEncoder();
+					return new Response(
+						new ReadableStream({
+							type: "bytes",
+							pull(controller) {
+								const next = chunks.next();
+								if (next.done) controller.close();
+								else controller.enqueue(encoder.encode(next.value));
+							},
+						}),
+						{
+							headers: {
+								"X-Metrics-Zones-Total": "1",
+								"X-Metrics-Zones-Filtered": "1",
+								"X-Metrics-Zones-Processed": "1",
+								"X-Metrics-Zones-Skipped-Free-Tier": "0",
+							},
+						},
+					);
 				},
 			}),
 		},
@@ -191,6 +230,7 @@ describe("MetricCoordinator packed colo output", () => {
 
 	it("does not serialize the whole packed snapshot before a slow reader consumes it", async () => {
 		let visitsRead = 0;
+		const exportedSnapshots: number[] = [];
 		const rows = Array.from({ length: 5000 }, (_, index) => ({
 			host: `host-${index}.example.com`,
 			value: 10,
@@ -205,7 +245,12 @@ describe("MetricCoordinator packed colo output", () => {
 				return Reflect.get(target, property, receiver);
 			},
 		});
-		const coordinator = await createCoordinator([state]);
+		const coordinator = await createCoordinator(
+			[state, packedState([{ host: "second.example.com", value: 1 }])],
+			[],
+			{},
+			(index) => exportedSnapshots.push(index),
+		);
 		const response = await coordinator.fetch(
 			new Request("https://test/export"),
 		);
@@ -219,13 +264,39 @@ describe("MetricCoordinator packed colo output", () => {
 		const readsAtCancel = visitsRead;
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(visitsRead).toBe(readsAtCancel);
+		expect(exportedSnapshots).toEqual([]);
+	});
+
+	it("continues with the next exporter when one snapshot fails", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const coordinator = await createCoordinator(
+			[
+				packedState([{ host: "failed.example.com", value: 1 }]),
+				packedState([{ host: "successful.example.com", value: 2 }]),
+			],
+			[],
+			{},
+			(index) => {
+				if (index === 0) throw new Error("snapshot unavailable");
+			},
+		);
+
+		const text = await (
+			await coordinator.fetch(new Request("https://test/export"))
+		).text();
+
+		expect(text).not.toContain("failed.example.com");
+		expect(text).toContain("successful.example.com");
 	});
 
 	it("passes one storage mode to every account so HELP/TYPE appear once", async () => {
 		const legacy = expectedMetrics([{ host: "b.example.com", value: 1 }]);
 		for (const coloMetricsPackedStorage of [true, false]) {
 			const coordinator = await createCoordinator(
-				[packedState([{ host: "a.example.com", value: 1 }])],
+				[
+					packedState([{ host: "a.example.com", value: 1 }]),
+					packedState([{ host: "b.example.com", value: 1 }]),
+				],
 				legacy,
 				{ coloMetricsPackedStorage },
 			);

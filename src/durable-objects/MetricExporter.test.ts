@@ -541,10 +541,17 @@ describe("MetricExporter packed columnar storage", () => {
 		);
 		expect(snapshot.zones[0]?.families[0]?.values).toEqual([20]);
 		expect(await packed.exporter.export()).toEqual([]);
+		expect(await packed.exporter.exportProcessedZones("packed")).toEqual([
+			"example.com",
+		]);
+		expect(await packed.exporter.exportProcessedZones("legacy")).toEqual([]);
 
 		const legacy = await createColumnarHarness(false);
 		await legacy.refresh(1);
 		expect(await legacy.exporter.exportPackedMetrics()).toBeUndefined();
+		expect(await legacy.exporter.exportProcessedZones("legacy")).toEqual([
+			"example.com",
+		]);
 		expect(await legacy.exporter.export()).toMatchObject([
 			{
 				name: "cloudflare_zone_requests_by_method_total",
