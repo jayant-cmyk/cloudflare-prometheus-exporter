@@ -1,0 +1,19 @@
+src/durable-objects/MetricExporter.test.ts
+  s_5941d6eb6f2ca5::t_2fda6b596cda67 401,416,422-423,437-453,455-459,463,473-478,493-525
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fd08ccf17556e89fa7c6c81fb863b39d3d812f2c",
+  "prompts": {},
+  "sessions": {
+    "s_5941d6eb6f2ca5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f50814621ffeuJPTlFviQadd9G",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
