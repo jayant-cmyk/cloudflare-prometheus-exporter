@@ -1,0 +1,19 @@
+src/cloudflare/client.test.ts
+  s_e65321cc7a050f::t_7654097dbc626a 18-21,28-51,54,57-65,67-74,76-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7fc9e88875be43ca3a18ec7aaf692943fdf5d84c",
+  "prompts": {},
+  "sessions": {
+    "s_e65321cc7a050f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f5076c06bffeXmbTHonQeSmsXv",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
