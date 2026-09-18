@@ -1,0 +1,23 @@
+src/cloudflare/client.test.ts
+  s_da6111a8a58ba0::t_fd6d6efc78f8e5 18-139
+src/cloudflare/client.ts
+  s_da6111a8a58ba0::t_991d6f3c6992ce 5,15,1493,1506-1507,1522,1525-1530,1532-1537,1543-1544,1547-1552,1554-1559,1561-1566,1568-1574,1576-1581,1583-1588,1590-1595,1603,1606,1608,1616-1641,1660,1850-1875,2130,2167-2172,2243,2269,2333-2334,2337,2368,2415,2446,2494,2513,2547,2600-2607,2706,2806-2816,2990-2991,2998,3039-3045,3110-3183,3221,3240,3276,3295,3335,3358,3467-3470,3477,3515,3523
+src/cloudflare/gql/queries.ts
+  s_da6111a8a58ba0::t_0f485291118b2c 452,460,474-516
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d7a6ec0f27b64321ed9eeea7e3afa02e68f0f88c",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
