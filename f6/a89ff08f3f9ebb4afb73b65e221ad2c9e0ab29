@@ -1,0 +1,25 @@
+src/lib/packed-columnar-metric.ts
+  s_da6111a8a58ba0::t_2cc28e59a87d63 1-644
+src/lib/packed-columnar-prometheus.ts
+  s_da6111a8a58ba0::t_c334b65b117ded 1-147
+src/lib/packed-metric-state.ts
+  s_da6111a8a58ba0::t_db58dbe4342d1c 1-10
+src/lib/prometheus.ts
+  s_da6111a8a58ba0::t_be5ecca2f18fc5 3-4,15-42,56-63,97-104,106-107,109,111,119,122,124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f6a89ff08f3f9ebb4afb73b65e221ad2c9e0ab29",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
