@@ -1,0 +1,19 @@
+src/lib/packed-columnar-metric.test.ts
+  s_da6111a8a58ba0::t_8983899ad15365 1-2,4-11,13-27,29-37,40-48,50,53-68,70-74,76-369,371-384,386-389,391-419,421-489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3f1f435cd9883bae39c4af26522b1638900d8de7",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
