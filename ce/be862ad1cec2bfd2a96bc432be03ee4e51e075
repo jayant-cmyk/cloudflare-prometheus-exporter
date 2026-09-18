@@ -1,0 +1,21 @@
+src/lib/columnar-observations.ts
+  s_da6111a8a58ba0::t_9234f03d204982 1-119
+src/lib/packed-columnar-metric.test.ts
+  s_da6111a8a58ba0::t_a01508edabfae9 1-489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cebe862ad1cec2bfd2a96bc432be03ee4e51e075",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
