@@ -1,0 +1,23 @@
+test/integration/metric-columnar-v1.test.ts
+  s_da6111a8a58ba0::t_7bbd5712d47387 1-303
+test/integration/wrangler.test.jsonc
+  s_da6111a8a58ba0::t_1e32d0fb92a184 50
+test/integration/wrangler.test.unpacked.jsonc
+  s_da6111a8a58ba0::t_14eef345282598 50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "353ea4b845deeb1265a1524a21ec02c6e0cb28c9",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
