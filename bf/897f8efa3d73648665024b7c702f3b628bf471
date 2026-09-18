@@ -1,0 +1,21 @@
+src/lib/runtime-config.ts
+  s_da6111a8a58ba0::t_40fb0b8a82114b 31-32,64,96,132,154-155,158-168,177-180,225-226,285-288,321-322
+wrangler.jsonc
+  s_da6111a8a58ba0::t_9c563ba92d5177 70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bf897f8efa3d73648665024b7c702f3b628bf471",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
