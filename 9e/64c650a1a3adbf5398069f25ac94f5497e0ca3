@@ -1,0 +1,31 @@
+src/durable-objects/AccountMetricCoordinator.ts
+  s_da6111a8a58ba0::t_45df7a099d2be8 7,18,21,42,74-80,337,340,365-373,376,378-384,386-401,403-408,411-478
+src/durable-objects/MetricCoordinator.test.ts
+  s_da6111a8a58ba0::t_402eaca04f844a 3,53,88-94,96-135,233,248-253,267-289,296-299
+src/durable-objects/MetricCoordinator.ts
+  s_da6111a8a58ba0::t_d5d7eddc3071e7 7,9-11,17-102,271,293-296,307,310-320,341-343,348-382
+src/durable-objects/MetricExporter.test.ts
+  s_da6111a8a58ba0::t_bba1807c231d79 544-547,552-554
+src/durable-objects/MetricExporter.ts
+  s_da6111a8a58ba0::t_900ab5b1b2cc36 25-28,36-39,72-73,104-114,223,481,491-492,533-534,932,945,966-1016
+src/lib/packed-metric-state.ts
+  s_da6111a8a58ba0::t_a702828b24af41 1-7
+test/integration/colo-metrics.test.ts
+  s_da6111a8a58ba0::t_010122d5778415 5-12,15,35,37-39,41-45,47,49,52,54,60,65,68,90-136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9e64c650a1a3adbf5398069f25ac94f5497e0ca3",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
