@@ -1,0 +1,19 @@
+test/integration/metric-exporter-helpers.ts
+  s_da6111a8a58ba0::t_d6d3ca4c089080 1-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2d962c30bc753bf6fc8f431d20c231f62f17d56b",
+  "prompts": {},
+  "sessions": {
+    "s_da6111a8a58ba0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f4bd8d2beffeiX9zYy8XkDaCcb",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
