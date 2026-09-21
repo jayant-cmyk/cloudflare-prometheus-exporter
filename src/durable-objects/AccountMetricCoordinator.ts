@@ -78,6 +78,10 @@ type PrometheusExportDescriptor = {
 	zone?: string;
 };
 
+type ResolvedPrometheusExport = PrometheusExportDescriptor & {
+	exporter: Awaited<ReturnType<typeof MetricExporter.get>>;
+};
+
 /**
  * Coordinates metric collection for a Cloudflare account and manages zone list caching and distributes work to MetricExporter DOs.
  */
@@ -384,30 +388,48 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 					})),
 				);
 		const exports = [...accountExports, ...zoneExports];
+		const resolvedExports = (
+			await Promise.all(
+				exports.map(async (descriptor) => {
+					try {
+						const exporter = await MetricExporter.get(
+							descriptor.exporterId,
+							this.env,
+						);
+						return { ...descriptor, exporter };
+					} catch (error) {
+						logger.error("Failed to initialize metric exporter", {
+							query: descriptor.query,
+							...(descriptor.zone && { zone: descriptor.zone }),
+							error: error instanceof Error ? error.message : String(error),
+						});
+						return undefined;
+					}
+				}),
+			)
+		).filter((descriptor) => descriptor !== undefined);
 		const orderedExports = [
-			...exports.filter((descriptor) => descriptor.mode === "legacy"),
-			...exports.filter((descriptor) => descriptor.mode === "packed"),
+			...resolvedExports.filter((descriptor) => descriptor.mode === "legacy"),
+			...resolvedExports.filter((descriptor) => descriptor.mode === "packed"),
 		];
 		const processedZones = new Set<string>();
-		for (const descriptor of exports) {
-			try {
-				const exporter = await MetricExporter.get(
-					descriptor.exporterId,
-					this.env,
-				);
-				for (const zone of await exporter.exportProcessedZones(
-					descriptor.mode,
-				)) {
-					processedZones.add(zone);
+		await Promise.all(
+			resolvedExports.map(async (descriptor) => {
+				try {
+					for (const zone of await descriptor.exporter.exportProcessedZones(
+						descriptor.mode,
+					)) {
+						processedZones.add(zone);
+					}
+				} catch (error) {
+					logger.error("Failed to export metric summary", {
+						query: descriptor.query,
+						...(descriptor.zone && { zone: descriptor.zone }),
+						error: error instanceof Error ? error.message : String(error),
+					});
 				}
-			} catch (error) {
-				logger.error("Failed to export metric summary", {
-					query: descriptor.query,
-					...(descriptor.zone && { zone: descriptor.zone }),
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
+			}),
+		);
 
 		return new Response(
 			createPrometheusStream(
@@ -427,7 +449,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 	}
 
 	private async *exportPrometheusChunks(
-		exports: readonly PrometheusExportDescriptor[],
+		exports: readonly ResolvedPrometheusExport[],
 		config: ResolvedConfig,
 		logger: Logger,
 	): AsyncGenerator<Uint8Array, void> {
@@ -437,11 +459,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 			let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 			let completed = false;
 			try {
-				const exporter = await MetricExporter.get(
-					descriptor.exporterId,
-					this.env,
-				);
-				const response = await exporter.exportPrometheus({
+				const response = await descriptor.exporter.exportPrometheus({
 					packed: descriptor.mode === "packed",
 					denylist,
 					excludeLabels,
@@ -462,6 +480,7 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 					...(descriptor.zone && { zone: descriptor.zone }),
 					error: error instanceof Error ? error.message : String(error),
 				});
+				throw error;
 			} finally {
 				if (reader !== undefined) {
 					if (!completed) {

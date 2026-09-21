@@ -449,15 +449,39 @@ async function createColoHarness(zoneCount = 1) {
 }
 
 describe("MetricExporter packed colo storage", () => {
-	it("replaces the legacy colo snapshot with generic columnar state", async () => {
+	it("migrates the legacy colo snapshot without resetting counters", async () => {
 		const h = await createColoHarness();
 		h.storage.values.set("packed-colo-metrics", {
 			format: "colo-packed-by-zone-v2",
+			accountId: "account-id",
+			accountName: "Account",
+			queryName: "colo-metrics",
+			lastFetch: 1,
+			lastIngest: 1735689600000,
+			zones: [
+				{
+					zone: "example.com",
+					colo: ["SJC"],
+					host: ["www.example.com"],
+					visits: [100],
+					edgeResponseBytes: [100],
+					requests: [100],
+					misses: [4],
+					lastIngest: [1735689600000],
+				},
+			],
 		});
 		h.setPacked(true);
+		const migrated = PackedColumnarMetricStateSchema.parse(
+			await h.exporter.exportPackedMetrics(),
+		);
+		expect(migrated.zones[0]?.families[0]).toMatchObject({
+			values: [100],
+			counter: { misses: [4], lastIngest: [1735689600000] },
+		});
 		await h.refresh(1);
 
-		expect(await h.requests()).toEqual([10]);
+		expect(await h.requests()).toEqual([110]);
 		expect(await h.exporter.exportPackedMetrics()).toMatchObject({
 			format: "metric-columnar-v1",
 		});

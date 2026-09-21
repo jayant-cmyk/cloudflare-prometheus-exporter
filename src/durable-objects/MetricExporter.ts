@@ -52,6 +52,23 @@ import {
 const STATE_KEY = "state";
 const LegacyPackedColoStateSchema = z.object({
 	format: z.literal("colo-packed-by-zone-v2"),
+	accountId: z.string(),
+	accountName: z.string(),
+	queryName: z.literal("colo-metrics"),
+	lastFetch: z.number(),
+	lastIngest: z.number(),
+	zones: z.array(
+		z.object({
+			zone: z.string(),
+			colo: z.array(z.string()),
+			host: z.array(z.string()),
+			visits: z.array(z.number()),
+			edgeResponseBytes: z.array(z.number()),
+			requests: z.array(z.number()),
+			misses: z.array(z.number().int().nonnegative()),
+			lastIngest: z.array(z.number()),
+		}),
+	),
 });
 const ALARM_RECOVERY_DELAY_MS = 60 * 1000;
 /**
@@ -121,6 +138,49 @@ function metricZones(metrics: readonly MetricDefinition[]): string[] {
 		}
 	}
 	return [...zones];
+}
+
+function migrateLegacyPackedColoState(
+	legacy: z.infer<typeof LegacyPackedColoStateSchema>,
+): PackedMetricState {
+	const families = [
+		{
+			name: "cloudflare_zone_colocation_visits_total",
+			help: "Visits per colo",
+			type: "counter" as const,
+			column: "visits" as const,
+		},
+		{
+			name: "cloudflare_zone_colocation_edge_response_bytes_total",
+			help: "Edge response bytes per colo",
+			type: "counter" as const,
+			column: "edgeResponseBytes" as const,
+		},
+		{
+			name: "cloudflare_zone_colocation_requests_total",
+			help: "Requests per colo",
+			type: "counter" as const,
+			column: "requests" as const,
+		},
+	];
+	return PackedMetricStateSchema.parse({
+		format: "metric-columnar-v1",
+		lastIngest: legacy.lastIngest,
+		families: families.map(({ column: _, ...family }) => family),
+		zones: legacy.zones.map((zone) => ({
+			zone: zone.zone,
+			families: families.map((family, index) => ({
+				family: index,
+				labels: index === 0 ? { colo: zone.colo, host: zone.host } : {},
+				...(index === 0 ? {} : { labelsFrom: 0 }),
+				values: zone[family.column],
+				counter: {
+					misses: zone.misses,
+					lastIngest: zone.lastIngest,
+				},
+			})),
+		})),
+	});
 }
 
 /**
@@ -898,8 +958,15 @@ export class MetricExporter extends DurableObject<Env> {
 		if (stored === undefined) return undefined;
 		const packed = PackedMetricStateSchema.safeParse(stored);
 		if (packed.success) return packed.data;
-		if (LegacyPackedColoStateSchema.safeParse(stored).success) {
-			return undefined;
+		const legacy = LegacyPackedColoStateSchema.safeParse(stored);
+		if (legacy.success) {
+			const migrated = migrateLegacyPackedColoState(legacy.data);
+			await saveChunkedValue(
+				chunkedDurableObjectStorage(this.ctx.storage),
+				PACKED_METRIC_STATE_KEY,
+				migrated,
+			);
+			return migrated;
 		}
 		return PackedMetricStateSchema.parse(stored);
 	}
