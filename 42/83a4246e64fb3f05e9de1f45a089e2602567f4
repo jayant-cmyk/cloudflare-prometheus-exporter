@@ -1,0 +1,23 @@
+src/durable-objects/MetricExporter.ts
+  s_21c041cab70dee::t_62f634fbf2bf46 27,439-442,911-917,920
+src/lib/packed-columnar-metric.test.ts
+  s_21c041cab70dee::t_492fce902a1c59 8,55-84
+src/lib/packed-columnar-metric.ts
+  s_21c041cab70dee::t_e03e106a3f6682 9-10,573-669
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4283a4246e64fb3f05e9de1f45a089e2602567f4",
+  "prompts": {},
+  "sessions": {
+    "s_21c041cab70dee": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f3c5b470affeHEFPaVTMwLKw57",
+        "model": "gpt-5.6"
+      },
+      "human_author": "jayant <jayant@cloudflare.com>"
+    }
+  }
+}
