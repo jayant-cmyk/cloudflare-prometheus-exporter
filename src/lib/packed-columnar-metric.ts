@@ -6,6 +6,8 @@ import {
 	serializeColumnarMetrics,
 } from "./packed-columnar-prometheus";
 import type { SerializeOptions } from "./prometheus";
+import { metricKey } from "./time";
+import type { CounterState } from "./types";
 
 export const COLUMNAR_METRIC_QUERIES = [
 	"adaptive-metrics",
@@ -566,6 +568,103 @@ export function accumulateColumnarMetricState(input: {
 		families,
 		zones,
 	};
+}
+
+function parseLegacyCounterKey(
+	key: string,
+): { name: string; labels: Record<string, string> } | undefined {
+	const labelsStart = key.indexOf("{");
+	if (labelsStart < 1 || !key.endsWith("}")) return undefined;
+	const labels: Record<string, string> = {};
+	const encodedLabels = key.slice(labelsStart + 1, -1);
+	if (encodedLabels !== "") {
+		for (const encodedLabel of encodedLabels.split(",")) {
+			const separator = encodedLabel.indexOf("=");
+			if (separator < 1) return undefined;
+			labels[encodedLabel.slice(0, separator)] = encodedLabel.slice(
+				separator + 1,
+			);
+		}
+	}
+	return { name: key.slice(0, labelsStart), labels };
+}
+
+/** Convert legacy counter state, including dormant series, to packed storage. */
+export function migrateLegacyColumnarMetricState(input: {
+	metrics: readonly MetricDefinition[];
+	counters: Readonly<Record<string, CounterState>>;
+	ingestId: number;
+}): PackedColumnarMetricState {
+	const counterFamilies = new Map<string, MetricDefinition>();
+	const currentCounters = new Map<
+		string,
+		{ name: string; help: string; labels: Record<string, string> }
+	>();
+	const metrics: MetricDefinition[] = [];
+
+	for (const metric of input.metrics) {
+		if (metric.type === "gauge") {
+			metrics.push(metric);
+			continue;
+		}
+		const family = { ...metric, values: [] };
+		counterFamilies.set(metric.name, family);
+		metrics.push(family);
+		for (const value of metric.values) {
+			currentCounters.set(metricKey(metric.name, value.labels), {
+				name: metric.name,
+				help: metric.help,
+				labels: value.labels,
+			});
+		}
+	}
+
+	for (const [key, counter] of Object.entries(input.counters)) {
+		const storedIdentity = counter.metric ?? currentCounters.get(key);
+		const identity = storedIdentity ?? parseLegacyCounterKey(key);
+		if (identity === undefined) continue;
+		let family = counterFamilies.get(identity.name);
+		if (family === undefined) {
+			const newFamily: MetricDefinition = {
+				name: identity.name,
+				help: storedIdentity?.help ?? "",
+				type: "counter",
+				values: [],
+			};
+			counterFamilies.set(identity.name, newFamily);
+			metrics.push(newFamily);
+			family = newFamily;
+		}
+		family.values.push({ labels: identity.labels, value: counter.accumulated });
+	}
+
+	const migrated = accumulateColumnarMetricState({
+		previous: undefined,
+		metrics,
+		ingestId: input.ingestId,
+		failedScopes: new Set(),
+	});
+	for (const zone of migrated.zones) {
+		for (const table of zone.families) {
+			const family = migrated.families[table.family];
+			if (family?.type !== "counter" || table.counter === undefined) continue;
+			const labels = resolveLabels(zone, table);
+			for (let index = 0; index < table.values.length; index++) {
+				const sampleLabels = Object.fromEntries(
+					Object.entries(labels).map(([name, values]) => [
+						name,
+						values[index] ?? "",
+					]),
+				);
+				if (zone.zone !== "") sampleLabels.zone = zone.zone;
+				const counter = input.counters[metricKey(family.name, sampleLabels)];
+				if (counter === undefined) continue;
+				table.counter.misses[index] = counter.missesRemaining ?? STALE_MISSES;
+				table.counter.lastIngest[index] = counter.lastIngest ?? input.ingestId;
+			}
+		}
+	}
+	return migrated;
 }
 
 function familySamples(

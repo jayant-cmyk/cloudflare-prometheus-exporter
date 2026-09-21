@@ -637,6 +637,37 @@ describe("MetricExporter packed columnar storage", () => {
 		expect(await h.exporter.export()).toEqual([]);
 	});
 
+	it("migrates a retained counter when the legacy snapshot is empty", async () => {
+		const storage = new AlarmStorage();
+		storage.values.set("state", {
+			...storedState(),
+			queryName: "request-method-metrics",
+			lastIngest: 1,
+			counters: {
+				"cloudflare_zone_requests_by_method_total{method=GET,zone=example.com}":
+					{
+						accumulated: 100,
+						missesRemaining: 4,
+						lastIngest: 1,
+						metric: {
+							name: "cloudflare_zone_requests_by_method_total",
+							help: "Requests by HTTP method",
+							labels: { zone: "example.com", method: "GET" },
+						},
+					},
+			},
+		});
+		const { exporter, ready } = createExporter(storage);
+		await ready;
+
+		const migrated = PackedColumnarMetricStateSchema.parse(
+			await exporter.exportPackedMetrics({ migrateLegacyMetrics: true }),
+		);
+
+		expect(migrated.zones[0]?.families[0]?.values).toEqual([100]);
+		expect(migrated.zones[0]?.families[0]?.counter?.misses).toEqual([4]);
+	});
+
 	it("persists and replays counters while retaining the flag-off legacy path", async () => {
 		const packed = await createColumnarHarness(true);
 		await packed.refresh(1);

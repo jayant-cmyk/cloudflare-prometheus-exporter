@@ -5,6 +5,7 @@ import {
 	accumulateColumnarMetricState,
 	COLUMNAR_METRIC_QUERIES,
 	type ColumnarMetricQuery,
+	migrateLegacyColumnarMetricState,
 	PackedColumnarMetricStateSchema,
 	serializeColumnarMetricStates,
 } from "./packed-columnar-metric";
@@ -51,6 +52,36 @@ function direct(metrics: MetricDefinition[]) {
 }
 
 describe("generic packed columnar metrics", () => {
+	it("continues a dormant legacy counter after packed migration", () => {
+		const migrated = migrateLegacyColumnarMetricState({
+			metrics: [],
+			counters: {
+				"cloudflare_zone_requests_by_method_total{method=GET,zone=example.com}":
+					{
+						accumulated: 100,
+						missesRemaining: 4,
+						lastIngest: 1,
+						metric: {
+							name: "cloudflare_zone_requests_by_method_total",
+							help: "Requests by HTTP method",
+							labels: { zone: "example.com", method: "GET" },
+						},
+					},
+			},
+			ingestId: 1,
+		});
+
+		expect(migrated.zones[0]?.families[0]?.values).toEqual([100]);
+		expect(migrated.zones[0]?.families[0]?.counter?.misses).toEqual([4]);
+		const refreshed = accumulate(
+			"request-method-metrics",
+			counter(5),
+			2,
+			migrated,
+		);
+		expect(refreshed.zones[0]?.families[0]?.values).toEqual([105]);
+	});
+
 	it("retains empty families in declaration order", () => {
 		const source = direct([
 			{

@@ -24,6 +24,7 @@ import {
 } from "../lib/metrics";
 import {
 	type ColumnarMetricSource,
+	migrateLegacyColumnarMetricState,
 	serializeColumnarMetricStates,
 } from "../lib/packed-columnar-metric";
 import {
@@ -435,7 +436,10 @@ export class MetricExporter extends DurableObject<Env> {
 		let nextRefreshDelaySeconds = config.metricRefreshIntervalSeconds;
 
 		try {
-			if (usePackedStorage && state.metrics.length > 0) {
+			if (
+				usePackedStorage &&
+				(state.metrics.length > 0 || Object.keys(state.counters).length > 0)
+			) {
 				const migrated = await this.loadOrMigratePackedMetricState();
 				if (migrated !== undefined) {
 					state = { ...state, metrics: [], counters: {} };
@@ -904,12 +908,16 @@ export class MetricExporter extends DurableObject<Env> {
 		if (stored !== undefined) return stored;
 
 		const state = this.getState();
-		if (state.metrics.length === 0) return undefined;
-		const migrated = accumulatePackedMetricState({
-			previous: undefined,
+		if (
+			state.metrics.length === 0 &&
+			Object.keys(state.counters).length === 0
+		) {
+			return undefined;
+		}
+		const migrated = migrateLegacyColumnarMetricState({
 			metrics: state.metrics,
 			ingestId: state.lastIngest,
-			failedScopes: new Set(),
+			counters: state.counters,
 		});
 		await saveChunkedValue(
 			chunkedDurableObjectStorage(this.ctx.storage),
