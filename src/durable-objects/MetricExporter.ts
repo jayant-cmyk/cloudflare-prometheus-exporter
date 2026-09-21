@@ -833,6 +833,9 @@ export class MetricExporter extends DurableObject<Env> {
 			) {
 				throw longestRetryError ?? firstChunkError;
 			}
+			if (usePackedStorage && queryableZones.length === 0) {
+				packedMetrics = [];
+			}
 			return {
 				metrics:
 					packedMetrics === undefined

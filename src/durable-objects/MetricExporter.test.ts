@@ -238,6 +238,45 @@ describe("MetricExporter state recovery", () => {
 		vi.unstubAllGlobals();
 	});
 
+	it("completes a packed refresh when every zone is backed off", async () => {
+		const storage = new AlarmStorage();
+		const zones = Array.from({ length: 11 }, (_, index) => ({
+			id: `zone-${index}`,
+			name: `zone-${index}.example.com`,
+			status: "active",
+			plan: { id: "paid", name: "Paid" },
+			account: { id: "account-id", name: "Account" },
+		}));
+		storage.values.set("state", {
+			...storedState(),
+			queryName: "adaptive-metrics",
+			zones,
+			zoneRetryAfter: Object.fromEntries(
+				zones.map((zone) => [zone.id, Date.now() + 60_000]),
+			),
+		});
+		const fetch = vi.fn<typeof globalThis.fetch>();
+		vi.stubGlobal("fetch", fetch);
+		const { exporter, ready } = createExporter(storage, {
+			CLOUDFLARE_API_TOKEN: "token",
+			CONFIG_KV: { get: vi.fn().mockResolvedValue(null) },
+			CF_API_RATE_LIMITER: {
+				limit: vi.fn().mockResolvedValue({ success: true }),
+			},
+			PACKED_METRIC_STORAGE: true,
+		});
+		await ready;
+
+		await exporter.alarm();
+
+		expect(fetch).not.toHaveBeenCalled();
+		expect(storage.values.get("state")).toMatchObject({ lastError: null });
+		expect(await exporter.exportPackedMetrics()).toMatchObject({
+			format: "metric-columnar-v1",
+			zones: [],
+		});
+	});
+
 	it("does not double-count when the platform retries the same alarm window", async () => {
 		const storage = new AlarmStorage();
 		const zone = {
