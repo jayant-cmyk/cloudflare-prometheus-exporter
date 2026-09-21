@@ -480,7 +480,6 @@ export class AccountMetricCoordinator extends DurableObject<Env> {
 					...(descriptor.zone && { zone: descriptor.zone }),
 					error: error instanceof Error ? error.message : String(error),
 				});
-				throw error;
 			} finally {
 				if (reader !== undefined) {
 					if (!completed) {

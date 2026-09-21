@@ -69,13 +69,15 @@ describe("AccountMetricCoordinator Prometheus export", () => {
 		expect(counts.streamed).toBe(counts.initialized);
 	});
 
-	it("propagates exporter stream failures", async () => {
+	it("continues after exporter stream failures", async () => {
 		const harness = createCoordinator({ failStream: true });
 		await harness.ready;
 		const response = await harness.coordinator.exportForPrometheus({
 			packedMetricQueries: [],
 		});
 
-		await expect(response.text()).rejects.toThrow("export stream failed");
+		await expect(response.text()).resolves.toBe("");
+		const counts = harness.counts();
+		expect(counts.streamed).toBe(counts.initialized);
 	});
 });
